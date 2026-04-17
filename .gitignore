@@ -1,0 +1,59 @@
+# Built artifacts
+*.apk
+*.aar
+*.jar
+!**/gradle/wrapper/gradle-wrapper.jar
+**/build/
+bin/
+
+# Gradle files
+**/.gradle/
+local.properties
+
+# IntelliJ/Android Studio
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# Python
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+venv/
+.venv/
+
+# Logs and temporary files
+*.log
+src/android/*.txt
+src/android/*.log
+src/android/dependencies.txt
+src/android/temp/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db

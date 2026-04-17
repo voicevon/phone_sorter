@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">芦笋分级系统</string>
+    <string name="capture">拍照</string>
+    <string name="result">结果</string>
+    <string name="grade">等级</string>
+    <string name="diameter">直径</string>
+    <string name="length">长度</string>
+    <string name="purple_root_position">紫根位置</string>
+</resources>
