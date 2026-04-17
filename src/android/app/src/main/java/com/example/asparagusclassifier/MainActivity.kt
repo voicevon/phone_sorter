@@ -19,6 +19,16 @@ import org.opencv.android.OpenCVLoader
 import android.util.Log
 import android.view.Menu
 import android.view.MenuItem
+import android.content.ContentValues
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import java.io.OutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     
@@ -81,13 +91,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                                    previewWidth: Int, previewHeight: Int, previewRatio: Float) {
         // UI 更新必须在主线程
         runOnUiThread {
-            Log.d("DiagCamera", "TextureView 状态: Available=${textureView.isAvailable}, HardwareAccelerated=${textureView.isHardwareAccelerated}")
-            val text = "版本: V3.1 - 深度诊断版\n" +
-                       "状态: 算法就绪\n" +
-                       "相机输出: ${cameraWidth}x${cameraHeight}\n" +
-                       "实际预览: ${textureView.width}x${textureView.height}\n" +
-                       "比例: ${"%.2f".format(previewRatio)}"
-            
+            val text = "直径: 0.0 mm\n长度: 0.0 mm"
             tvResult.text = text
             tvResult.visibility = View.VISIBLE
         }
@@ -114,24 +118,26 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             
             Log.i("MainActivity", "OverlayView尺寸: ${overlayView.width}x${overlayView.height}")
             
-            val result = AlgorithmProcessor.processImage(bitmap)
-            displayResult(result)
         } else {
             Log.e("MainActivity", "无法获取图像")
             tvResult.text = "错误: 无法获取图像"
             android.widget.Toast.makeText(this, "错误: 无法获取图像", android.widget.Toast.LENGTH_LONG).show()
         }
+        
+        // 如果识别失败，则保存当前 Bitmap 用于调试
+        if (bitmap != null) {
+            val result = AlgorithmProcessor.processImage(bitmap)
+            if (!result.success) {
+                Log.w("MainActivity", "识别失败，正在保存调试图片...")
+                saveDebugImage(bitmap)
+            }
+            displayResult(result)
+        }
     }
     
     
     private fun displayResult(result: AlgorithmResult) {
-        val modeText = "模式: 芦笋分级\n等级: ${result.grade}\n直径: ${result.diameter} mm\n长度: ${result.length} mm"
-    
-        val text = "$modeText\n" +
-                   "ArUco 标记: ${result.arucoIds?.size ?: 0} 个\n" +
-                   "Bitmap: ${lastBitmap?.width}x${lastBitmap?.height}\n" +
-                   "TextureView: ${textureView.width}x${textureView.height}\n" +
-                   "结果: ${if (result.success) "识别成功" else "识别失败: ${result.error}"}"
+        val text = "直径: ${result.diameter} mm\n长度: ${result.length} mm"
         
         tvResult.text = text
         tvResult.visibility = View.VISIBLE
@@ -156,6 +162,8 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             overlayView.setAsparagusTail(result.tailPoint)
             // 设置直径测量线
             overlayView.setDiameterLine(result.diameterLine)
+            // 设置轴线路径
+            overlayView.setAxisPath(result.axisPath)
             
             // 同时也设置矩形作为备份或调试信息（可选，OverlayView 现在优先画轮廓）
             result.asparagusRect?.let { overlayView.setAsparagusRect(it) }
@@ -167,7 +175,43 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         }
     }
     
+    
+    private val diskExecutor = Executors.newSingleThreadExecutor()
 
+    private fun saveDebugImage(bitmap: Bitmap) {
+        diskExecutor.execute {
+            val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+            val fileName = "ASPARAGUS_DEBUG_$timeStamp.png"
+            
+            try {
+                val resolver = contentResolver
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Asparagus_Debug")
+                    }
+                }
+
+                val imageUri: Uri? = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+                
+                imageUri?.let { uri ->
+                    val outputStream: OutputStream? = resolver.openOutputStream(uri)
+                    outputStream?.use {
+                        bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+                    }
+                    Log.i("MainActivity", "调试图片已保存至: Downloads/Asparagus_Debug/$fileName")
+                    
+                    runOnUiThread {
+                        android.widget.Toast.makeText(this, "未检测到芦笋，截图已存入外部存储", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MainActivity", "保存调试文件失败: ${e.message}")
+            }
+        }
+    }
+    
     override fun onDestroy() {
         super.onDestroy()
         cameraManager.release()

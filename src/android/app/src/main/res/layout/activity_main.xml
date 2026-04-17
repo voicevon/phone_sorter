@@ -44,17 +44,16 @@
 
     <TextView
         android:id="@+id/tvResult"
-        android:layout_width="match_parent"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_margin="16dp"
-        android:background="#AAFFFFFF"
-        android:padding="16dp"
-        android:textColor="@android:color/black"
-        android:textSize="16sp"
+        android:background="#88000000"
+        android:padding="12dp"
+        android:textColor="@android:color/white"
+        android:textSize="18sp"
         android:textStyle="bold"
         android:visibility="gone"
-        app:layout_constraintBottom_toTopOf="@+id/btnCapture"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent" />
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

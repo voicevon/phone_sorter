@@ -56,6 +56,14 @@ class OverlayView @JvmOverloads constructor(
         strokeWidth = 8f
     }
     
+    // 蓝色点划线画笔用于轴线
+    private val axisPaint = Paint().apply {
+        color = Color.BLUE
+        style = Paint.Style.STROKE
+        strokeWidth = 6f
+        pathEffect = DashPathEffect(floatArrayOf(20f, 10f, 5f, 10f), 0f)
+    }
+    
     private val textBackgroundPaint = Paint().apply {
         color = Color.argb(180, 0, 0, 0)
         style = Paint.Style.FILL
@@ -64,6 +72,7 @@ class OverlayView @JvmOverloads constructor(
     private var asparagusRect: Rect? = null
     private var asparagusContour: List<PointF>? = null
     private var tailPoint: PointF? = null
+    private var axisPath: List<PointF>? = null
     private var diameterLine: List<PointF>? = null
     private var arucoMarkers: List<ArucoMarker>? = null
     private var bitmapWidth: Int = 0
@@ -90,6 +99,11 @@ class OverlayView @JvmOverloads constructor(
         diameterLine = line
         invalidate()
     }
+
+    fun setAxisPath(path: List<PointF>?) {
+        axisPath = path
+        invalidate()
+    }
     
     fun setArucoMarkers(markers: List<ArucoMarker>, bitmapW: Int, bitmapH: Int) {
         arucoMarkers = markers
@@ -104,6 +118,7 @@ class OverlayView @JvmOverloads constructor(
         asparagusRect = null
         asparagusContour = null
         tailPoint = null
+        axisPath = null
         diameterLine = null
         invalidate()
     }
@@ -248,6 +263,23 @@ class OverlayView @JvmOverloads constructor(
             canvas.drawLine(p1[0], p1[1], p2[0], p2[1], measurementPaint)
         }
         
+        // 绘制轴线（蓝色点划线）
+        if (axisPath != null && axisPath!!.size >= 2) {
+            val path = Path()
+            val points = axisPath!!
+            val p0 = floatArrayOf(points[0].x, points[0].y)
+            coordinateMatrix.mapPoints(p0)
+            path.moveTo(p0[0], p0[1])
+            val buffer = FloatArray(2)
+            for (i in 1 until points.size) {
+                buffer[0] = points[i].x
+                buffer[1] = points[i].y
+                coordinateMatrix.mapPoints(buffer)
+                path.lineTo(buffer[0], buffer[1])
+            }
+            canvas.drawPath(path, axisPaint)
+        }
+
         // 绘制芦笋头尾标记（紫根位置 - 黄色）
         if (tailPoint != null) {
             val pointBuffer = floatArrayOf(tailPoint!!.x, tailPoint!!.y)
