@@ -96,81 +96,73 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             tvResult.visibility = View.VISIBLE
         }
     }
-    
+
     private var lastBitmap: Bitmap? = null
-    
+    private var lastSensorRotation: Int = 0
+
     private fun captureAndProcess() {
-        Log.i("MainActivity", "开始分析按钮被点击")
-        
-        // 显示 Toast 提示
-        android.widget.Toast.makeText(this, "正在分析，请稍候...", android.widget.Toast.LENGTH_SHORT).show()
-        
-        // 更新文本显示
+        Log.i("MainActivity", "开始分析按鈕被点击")
+
+        // 立即禁用按鈕，防止重复点击
+        btnCapture.isEnabled = false
+        btnCapture.text = "分析中..."
         tvResult.text = "正在分析，请稍候..."
         tvResult.visibility = View.VISIBLE
-        
+
         val bitmap = textureView.getBitmap()
-        if (bitmap != null) {
-            // getBitmap() 返回的是 TextureView 的原始像素，未应用 setTransform 的旋转变换。
-            // 必须根据传感器方向手动旋转，才能保证 OpenCV 自延接正确方向的图像
-            val sensorRot = cameraManager.getSensorOrientation()
-            val correctedBitmap = if (sensorRot != 0) {
-                val matrix = android.graphics.Matrix()
-                matrix.postRotate(sensorRot.toFloat())
-                Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-            } else {
-                bitmap
-            }
-            lastBitmap = correctedBitmap
-            Log.i("MainActivity", "原始 Bitmap尺寸: ${bitmap.width}x${bitmap.height}, 传感器旋转: ${sensorRot}°")
-            Log.i("MainActivity", "修正后 Bitmap尺寸: ${correctedBitmap.width}x${correctedBitmap.height}")
-            Log.i("MainActivity", "TextureView尺寸: ${textureView.width}x${textureView.height}")
-            Log.i("MainActivity", "OverlayView尺寸: ${overlayView.width}x${overlayView.height}")
-        } else {
+        if (bitmap == null) {
             Log.e("MainActivity", "无法获取图像")
             tvResult.text = "错误: 无法获取图像"
-            android.widget.Toast.makeText(this, "错误: 无法获取图像", android.widget.Toast.LENGTH_LONG).show()
+            btnCapture.isEnabled = true
+            btnCapture.text = "开始分析"
+            return
         }
-        
-        // 如果识别失败，则保存当前 Bitmap 用于调试
-        if (lastBitmap != null) {
-            val result = AlgorithmProcessor.processImage(lastBitmap!!)
-            if (!result.success) {
-                Log.w("MainActivity", "识别失败，正在保存调试图片...")
-                saveDebugImage(lastBitmap!!)
+
+        // 在后台线程执行适宽转 + OpenCV 分析，不阻塞主线程
+        diskExecutor.execute {
+            // 1. 获取预览图
+            // 注意：TextureView.getBitmap() 已包含 setTransform 应用的旋转，方向与用户所见一致
+            val correctedBitmap = bitmap 
+            Log.i("MainActivity", "Captured Bitmap 尺寸: ${correctedBitmap.width}x${correctedBitmap.height}")
+
+            // 2. 运行算法
+            val t0 = System.currentTimeMillis()
+            val result = AlgorithmProcessor.processImage(correctedBitmap)
+            val elapsed = System.currentTimeMillis() - t0
+            Log.i("MainActivity", "算法耗时: ${elapsed}ms")
+
+            // 3. 更新 UI 必须切回主线程
+            runOnUiThread {
+                lastBitmap = correctedBitmap
+                lastSensorRotation = 0 // 已在位图级对齐，无需矩阵再次旋转
+                if (!result.success) {
+                    Log.w("MainActivity", "识别失败，正在保存调试图片...")
+                    saveDebugImage(correctedBitmap)
+                }
+                displayResult(result)
+                // 处理完成后恢复按鈕
+                btnCapture.isEnabled = true
+                btnCapture.text = "开始分析"
             }
-            displayResult(result)
         }
     }
-    
-    
+
     private fun displayResult(result: AlgorithmResult) {
         val text = "直径: ${result.diameter} mm\n长度: ${result.length} mm"
         
         tvResult.text = text
         tvResult.visibility = View.VISIBLE
         
-        // 显示 ArUco 标记（四边形）- 使用 TextureView 尺寸而非 bitmap 尺寸
+        // 显示 ArUco 标记（四边形）
         if (result.arucoCorners != null && result.arucoIds != null && lastBitmap != null) {
             val markers = result.arucoCorners.zip(result.arucoIds).map { (corners, id) ->
                 com.example.asparagusclassifier.ui.ArucoMarker(corners, id)
             }
-            Log.d(TAG, "设置标记: Bitmap尺寸=${lastBitmap!!.width}x${lastBitmap!!.height}, View尺寸=${overlayView.width}x${overlayView.height}")
+            Log.d(TAG, "设置标记: Bitmap=${lastBitmap!!.width}x${lastBitmap!!.height}, 传感器旋转=${lastSensorRotation}°")
 
-            // 把 TextureView 相对于 OverlayView 的实际显示区域传进去，
-            // 这样覆盖层的坐标映射才能和预览画面完全对齐
-            val tvLeft = textureView.left.toFloat()
-            val tvTop = textureView.top.toFloat()
-            val tvRight = textureView.right.toFloat()
-            val tvBottom = textureView.bottom.toFloat()
-            overlayView.setDisplayRect(tvLeft, tvTop, tvRight, tvBottom)
-            Log.d(TAG, "TextureView 位置: left=$tvLeft, top=$tvTop, right=$tvRight, bottom=$tvBottom")
-
-            // 关键修改：使用 Bitmap 的实际尺寸，由 OverlayView 负责映射到 View 尺寸
-            overlayView.setArucoMarkers(markers, lastBitmap!!.width, lastBitmap!!.height)
+            // 传入传感器旋转角度，让 OverlayView 知道如何将 bitmap 坐标旋转到屏幕方向
+            overlayView.setArucoMarkers(markers, lastBitmap!!.width, lastBitmap!!.height, lastSensorRotation)
             overlayView.visibility = View.VISIBLE
-            
-            Log.i("MainActivity", "设置标记完成: 使用Bitmap尺寸 ${lastBitmap!!.width}x${lastBitmap!!.height}")
         }
         
         // 显示芦笋区域
@@ -178,8 +170,8 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             overlayView.setAsparagusContour(result.asparagusContour)
             // 设置紫根/尾部标记
             overlayView.setAsparagusTail(result.tailPoint)
-            // 设置直径测量线
-            overlayView.setDiameterLine(result.diameterLine)
+            // 设置直径测量线 (支持多条)
+            overlayView.setDiameterLines(result.diameterLine)
             // 设置轴线路径
             overlayView.setAxisPath(result.axisPath)
             

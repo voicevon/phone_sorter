@@ -73,12 +73,14 @@ class OverlayView @JvmOverloads constructor(
     private var asparagusContour: List<PointF>? = null
     private var tailPoint: PointF? = null
     private var axisPath: List<PointF>? = null
-    private var diameterLine: List<PointF>? = null
+    private var diameterLines: List<List<PointF>>? = null
     private var arucoMarkers: List<ArucoMarker>? = null
     private var bitmapWidth: Int = 0
     private var bitmapHeight: Int = 0
     // TextureView 在屏幕上的实际显示区域（相对于 OverlayView 自身的坐标）
     private var displayRect: RectF? = null
+    // 传感器方向（和 MainActivity 进行位图旋转时一致）
+    private var sensorRotation: Int = 0
     
     private val coordinateMatrix = Matrix()
 
@@ -97,8 +99,8 @@ class OverlayView @JvmOverloads constructor(
         invalidate()
     }
 
-    fun setDiameterLine(line: List<PointF>?) {
-        diameterLine = line
+    fun setDiameterLines(lines: List<List<PointF>>?) {
+        diameterLines = lines
         invalidate()
     }
 
@@ -107,10 +109,11 @@ class OverlayView @JvmOverloads constructor(
         invalidate()
     }
     
-    fun setArucoMarkers(markers: List<ArucoMarker>, bitmapW: Int, bitmapH: Int) {
+    fun setArucoMarkers(markers: List<ArucoMarker>, bitmapW: Int, bitmapH: Int, sensorRot: Int = 0) {
         arucoMarkers = markers
         bitmapWidth = bitmapW
         bitmapHeight = bitmapH
+        sensorRotation = sensorRot
         updateMatrix()
         invalidate()
     }
@@ -121,7 +124,7 @@ class OverlayView @JvmOverloads constructor(
         asparagusContour = null
         tailPoint = null
         axisPath = null
-        diameterLine = null
+        diameterLines = null
         invalidate()
     }
 
@@ -147,16 +150,14 @@ class OverlayView @JvmOverloads constructor(
     private fun updateMatrix() {
         if (bitmapWidth > 0 && bitmapHeight > 0 && width > 0 && height > 0) {
             val bitmapRect = RectF(0f, 0f, bitmapWidth.toFloat(), bitmapHeight.toFloat())
-
-            // 如果外部传入了 TextureView 的精确区域，就直接映射到该区域；
-            // 否则降级为 CENTER 模式展示（保持宽高比）
-            val targetRect = displayRect ?: RectF(0f, 0f, width.toFloat(), height.toFloat())
+            val viewRect = RectF(0f, 0f, width.toFloat(), height.toFloat())
 
             coordinateMatrix.reset()
-            // CENTER 模式：保持宽高比，居中映射，不拉伸变形
-            coordinateMatrix.setRectToRect(bitmapRect, targetRect, Matrix.ScaleToFit.CENTER)
+            // 简单对齐：将 Bitmap 缩放居中映射到 OverlayView
+            // 假设输入的 Bitmap 已经由 TextureView.getBitmap() 处理好方向
+            coordinateMatrix.setRectToRect(bitmapRect, viewRect, Matrix.ScaleToFit.CENTER)
 
-            Log.d("OverlayView", "Matrix update: View=${width}x${height}, Bitmap=${bitmapWidth}x${bitmapHeight}, Target=$targetRect")
+            Log.d("OverlayView", "Matrix update: View=${width}x${height}, Bitmap=${bitmapWidth}x${bitmapHeight}")
         }
     }
     
@@ -241,14 +242,15 @@ class OverlayView @JvmOverloads constructor(
         }
         
         
-        // 绘制直径测量线（蓝色）
-        if (diameterLine != null && diameterLine!!.size >= 2) {
-            val p1 = floatArrayOf(diameterLine!![0].x, diameterLine!![0].y)
-            val p2 = floatArrayOf(diameterLine!![1].x, diameterLine!![1].y)
-            coordinateMatrix.mapPoints(p1)
-            coordinateMatrix.mapPoints(p2)
-            
-            canvas.drawLine(p1[0], p1[1], p2[0], p2[1], measurementPaint)
+        // 绘制多条直径测量线（蓝色）
+        diameterLines?.forEach { line ->
+            if (line.size >= 2) {
+                val p1 = floatArrayOf(line[0].x, line[0].y)
+                val p2 = floatArrayOf(line[1].x, line[1].y)
+                coordinateMatrix.mapPoints(p1)
+                coordinateMatrix.mapPoints(p2)
+                canvas.drawLine(p1[0], p1[1], p2[0], p2[1], measurementPaint)
+            }
         }
         
         // 绘制轴线（蓝色点划线）
