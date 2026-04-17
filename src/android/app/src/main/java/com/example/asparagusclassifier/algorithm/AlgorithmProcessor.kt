@@ -15,6 +15,7 @@ data class AlgorithmResult(
     val success: Boolean,
     val grade: String = "F",
     val diameter: Double = 0.0,
+    val rawDiameter: Double = 0.0,
     val length: Double = 0.0,
     val purpleRootPosition: String = "未检测到",
     val asparagusRect: Rect? = null,
@@ -206,7 +207,8 @@ object AlgorithmProcessor {
                     axisPointsInRoi
                 }
 
-                var diameterMm = 0.0
+                var rawDiameterMm = 0.0
+                var correctedDiameterMm = 0.0
                 var lengthMm = 0.0
                 val allDiameterLinesInRoi = mutableListOf<List<PointF>>()
                 
@@ -238,17 +240,18 @@ object AlgorithmProcessor {
                     }
                     
                     if (diameterSamples.isNotEmpty()) {
-                        diameterMm = diameterSamples.average()
+                        rawDiameterMm = diameterSamples.average()
+                        correctedDiameterMm = maxOf(0.0, rawDiameterMm - 1.5)
                     }
                 }
                 currentRoiMask.release()
 
                 val grade = when {
-                    diameterMm > 15.0 -> "A"
-                    diameterMm > 12.0 -> "B"
-                    diameterMm > 10.0 -> "C"
-                    diameterMm > 8.0 -> "D"
-                    diameterMm > 5.0 -> "E"
+                    correctedDiameterMm > 15.0 -> "A"
+                    correctedDiameterMm > 12.0 -> "B"
+                    correctedDiameterMm > 10.0 -> "C"
+                    correctedDiameterMm > 8.0 -> "D"
+                    correctedDiameterMm > 5.0 -> "E"
                     else -> "F"
                 }
                 
@@ -271,8 +274,9 @@ object AlgorithmProcessor {
                 return AlgorithmResult(
                     success = true,
                     grade = grade,
-                    diameter = "%.2f".format(diameterMm).toDouble(),
-                    length = "%.2f".format(lengthMm).toDouble(),
+                    diameter = correctedDiameterMm,
+                    rawDiameter = rawDiameterMm,
+                    length = lengthMm,
                     purpleRootPosition = if (finalTailPoint != null) "(${finalTailPoint.x.toInt()}, ${finalTailPoint.y.toInt()})" else "未检测到",
                     asparagusRect = android.graphics.Rect(
                         ((rectInRoi.x + roiRect.x) * invScale).toInt(), 

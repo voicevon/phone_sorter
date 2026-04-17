@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.view.TextureView
 import android.view.View
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -27,6 +28,12 @@ import android.provider.MediaStore
 import java.io.OutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
+import android.speech.tts.TextToSpeech
+import android.text.SpannableString
+import android.text.Spannable
+import android.text.style.RelativeSizeSpan
+import android.text.style.StyleSpan
+import android.graphics.Typeface
 import java.util.Locale
 import java.util.concurrent.Executors
 
@@ -36,7 +43,20 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     private lateinit var textureView: TextureView
     private lateinit var overlayView: OverlayView
     private lateinit var btnCapture: Button
+    private lateinit var cbAuto: CheckBox
     private lateinit var tvResult: TextView
+    private lateinit var tts: TextToSpeech
+    
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val autoCaptureRunnable = object : java.lang.Runnable {
+        override fun run() {
+            if (cbAuto.isChecked) {
+                if (btnCapture.isEnabled) {
+                    btnCapture.performClick()
+                }
+            }
+        }
+    }
     
     
     private val CAMERA_PERMISSION_CODE = 100
@@ -44,6 +64,23 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        supportActionBar?.let { actionBar ->
+            val titleText = "冯氏芦笋工具 (2026年4月)"
+            val spannableTitle = SpannableString(titleText)
+            val startIdx = titleText.indexOf("(")
+            if (startIdx >= 0) {
+                spannableTitle.setSpan(RelativeSizeSpan(0.6f), startIdx, titleText.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+                spannableTitle.setSpan(StyleSpan(Typeface.NORMAL), startIdx, titleText.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            actionBar.title = spannableTitle
+        }
+        
+        tts = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                tts.language = Locale.CHINESE
+            }
+        }
         
         if (!OpenCVLoader.initDebug()) {
             Log.e(TAG, "OpenCV 初始化失败！")
@@ -58,12 +95,21 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         cameraManager = CameraManager(this, textureView)
         
         btnCapture = findViewById(R.id.btnCapture)
+        cbAuto = findViewById(R.id.cbAuto)
         tvResult = findViewById(R.id.tvResult)
         
         cameraManager.setOnSizeInfoListener(this)
         
         btnCapture.setOnClickListener {
             captureAndProcess()
+        }
+        
+        cbAuto.setOnCheckedChangeListener { _, isChecked ->
+            if (isChecked) {
+                handler.post(autoCaptureRunnable)
+            } else {
+                handler.removeCallbacks(autoCaptureRunnable)
+            }
         }
         
         checkCameraPermission()
@@ -136,8 +182,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                 lastBitmap = correctedBitmap
                 lastSensorRotation = 0 // 已在位图级对齐，无需矩阵再次旋转
                 if (!result.success) {
-                    Log.w("MainActivity", "识别失败，正在保存调试图片...")
-                    saveDebugImage(correctedBitmap)
+                    Log.w("MainActivity", "识别失败，不再保存调试图片")
                 }
                 displayResult(result)
                 // 处理完成后恢复按鈕
@@ -148,10 +193,35 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     }
 
     private fun displayResult(result: AlgorithmResult) {
-        val text = "直径: ${result.diameter} mm\n长度: ${result.length} mm"
+        val diameterStr = String.format(java.util.Locale.US, "%.1f", result.diameter)
+        val rawStr = String.format(java.util.Locale.US, "%.1f", result.rawDiameter)
+        val plainText = "直径: $diameterStr mm (raw: $rawStr)\n长度: ${result.length.toInt()} mm"
         
-        tvResult.text = text
+        val spannable = SpannableString(plainText)
+        val rawStart = plainText.indexOf("(raw:")
+        if (rawStart >= 0) {
+            val rawEnd = plainText.indexOf(")", rawStart) + 1
+            spannable.setSpan(RelativeSizeSpan(0.6f), rawStart, rawEnd, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            spannable.setSpan(StyleSpan(Typeface.NORMAL), rawStart, rawEnd, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        
+        tvResult.text = spannable
         tvResult.visibility = View.VISIBLE
+        
+        val isZero = result.diameter <= 0.0
+        
+        if (!isZero && ::tts.isInitialized) {
+            val diameterCm = result.diameter / 10.0
+            val lengthCm = result.length / 10.0
+            val ttsText = "直径 ${String.format(java.util.Locale.US, "%.1f", diameterCm)}，长度 ${lengthCm.toInt()}"
+            tts.speak(ttsText, TextToSpeech.QUEUE_FLUSH, null, null)
+        }
+        
+        if (cbAuto.isChecked) {
+            val delay = if (isZero) 1000L else 5000L
+            handler.removeCallbacks(autoCaptureRunnable)
+            handler.postDelayed(autoCaptureRunnable, delay)
+        }
         
         // 显示 ArUco 标记（四边形）
         if (result.arucoCorners != null && result.arucoIds != null && lastBitmap != null) {
@@ -188,42 +258,37 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     
     private val diskExecutor = Executors.newSingleThreadExecutor()
 
-    private fun saveDebugImage(bitmap: Bitmap) {
-        diskExecutor.execute {
-            val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-            val fileName = "ASPARAGUS_DEBUG_$timeStamp.png"
-            
-            try {
-                val resolver = contentResolver
-                val contentValues = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-                    put(MediaStore.MediaColumns.MIME_TYPE, "image/png")
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/Asparagus_Debug")
-                    }
-                }
+    
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menuInflater.inflate(R.menu.main_menu, menu)
+        return true
+    }
 
-                val imageUri: Uri? = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
-                
-                imageUri?.let { uri ->
-                    val outputStream: OutputStream? = resolver.openOutputStream(uri)
-                    outputStream?.use {
-                        bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
-                    }
-                    Log.i("MainActivity", "调试图片已保存至: Downloads/Asparagus_Debug/$fileName")
-                    
-                    runOnUiThread {
-                        android.widget.Toast.makeText(this, "未检测到芦笋，截图已存入外部存储", android.widget.Toast.LENGTH_SHORT).show()
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e("MainActivity", "保存调试文件失败: ${e.message}")
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            R.id.action_about -> {
+                android.app.AlertDialog.Builder(this)
+                    .setTitle("关于")
+                    .setMessage("冯氏芦笋工具 (2026年4月)\n\n研发人：冯树民\n微信号：13306400990")
+                    .setPositiveButton("确定", null)
+                    .show()
+                true
             }
+            R.id.action_exit -> {
+                finish()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
         }
     }
     
     override fun onDestroy() {
         super.onDestroy()
+        handler.removeCallbacks(autoCaptureRunnable)
+        if (::tts.isInitialized) {
+            tts.stop()
+            tts.shutdown()
+        }
         cameraManager.release()
     }
 }

@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">芦笋分级系统</string>
+    <string name="app_name">冯氏芦笋工具</string>
     <string name="capture">拍照</string>
     <string name="result">结果</string>
     <string name="grade">等级</string>
