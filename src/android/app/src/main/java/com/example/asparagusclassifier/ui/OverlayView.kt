@@ -77,6 +77,8 @@ class OverlayView @JvmOverloads constructor(
     private var arucoMarkers: List<ArucoMarker>? = null
     private var bitmapWidth: Int = 0
     private var bitmapHeight: Int = 0
+    // TextureView 在屏幕上的实际显示区域（相对于 OverlayView 自身的坐标）
+    private var displayRect: RectF? = null
     
     private val coordinateMatrix = Matrix()
 
@@ -123,6 +125,20 @@ class OverlayView @JvmOverloads constructor(
         invalidate()
     }
 
+    /**
+     * 设置 TextureView 在屏幕上的实际显示区域，这样叠加层才能将
+     * Bitmap 坐标准确映射到 TextureView 的屏幕位置上。
+     * @param left   TextureView 左边相对于 OverlayView 的 X 坐标
+     * @param top    TextureView 顶边相对于 OverlayView 的 Y 坐标
+     * @param right  TextureView 右边
+     * @param bottom TextureView 底边
+     */
+    fun setDisplayRect(left: Float, top: Float, right: Float, bottom: Float) {
+        displayRect = RectF(left, top, right, bottom)
+        updateMatrix()
+        invalidate()
+    }
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         updateMatrix()
@@ -130,45 +146,17 @@ class OverlayView @JvmOverloads constructor(
 
     private fun updateMatrix() {
         if (bitmapWidth > 0 && bitmapHeight > 0 && width > 0 && height > 0) {
-            val viewRect = RectF(0f, 0f, width.toFloat(), height.toFloat())
             val bitmapRect = RectF(0f, 0f, bitmapWidth.toFloat(), bitmapHeight.toFloat())
-            
+
+            // 如果外部传入了 TextureView 的精确区域，就直接映射到该区域；
+            // 否则降级为 CENTER 模式展示（保持宽高比）
+            val targetRect = displayRect ?: RectF(0f, 0f, width.toFloat(), height.toFloat())
+
             coordinateMatrix.reset()
-            
-            val viewAspect = width.toFloat() / height.toFloat()
-            val bitmapAspect = bitmapWidth.toFloat() / bitmapHeight.toFloat()
-            
-            // Check for orientation mismatch (one is landscape, one is portrait)
-            // Allow some tolerance for aspect ratios
-            val viewIsLandscape = viewAspect > 1.0f
-            val bitmapIsLandscape = bitmapAspect > 1.0f
-            
-            if (viewIsLandscape != bitmapIsLandscape) {
-                Log.w("OverlayView", "Orientation Mismatch detected! View=${width}x${height}, Bitmap=${bitmapWidth}x${bitmapHeight}. Applying 90 deg rotation correction.")
-                
-                // Align centers
-                val centerX = width / 2f
-                val centerY = height / 2f
-                
-                // Scale to fit (which might need swapping dimensions effectively)
-                // We map BitmapRect to ViewRect, then rotate? 
-                // No, if we rotate, the mapping changes.
-                
-                // Strategy: Map Bitmap to a rotated ViewRect centered at origin?
-                // Simpler Strategy: Map Bitmap -> View, then Post Rotate around center.
-                coordinateMatrix.setRectToRect(bitmapRect, viewRect, Matrix.ScaleToFit.CENTER)
-                coordinateMatrix.postRotate(90f, centerX, centerY)
-                
-                // After 90 deg rotation, the aspect ratio might be wrong if we just did ScaleToFit.FILL on mismatched rects?
-                // Let's use ScaleToFit.CENTER to preserve aspect, then Rotate.
-                // But the user said "Red Box is rotated".
-                // If we have a mismatch, likely the Bitmap is the UNROTATED source (Portrait) and View is Landscape.
-                // So we need to rotate the coordinates 90 degrees to match the Landscape View.
-            } else {
-                coordinateMatrix.setRectToRect(bitmapRect, viewRect, Matrix.ScaleToFit.FILL)
-            }
-            
-            Log.d("OverlayView", "Matrix update: View=${width}x${height}, Bitmap=${bitmapWidth}x${bitmapHeight}, Matrix=${coordinateMatrix.toShortString()}")
+            // CENTER 模式：保持宽高比，居中映射，不拉伸变形
+            coordinateMatrix.setRectToRect(bitmapRect, targetRect, Matrix.ScaleToFit.CENTER)
+
+            Log.d("OverlayView", "Matrix update: View=${width}x${height}, Bitmap=${bitmapWidth}x${bitmapHeight}, Target=$targetRect")
         }
     }
     

@@ -59,6 +59,9 @@ class CameraManager(private val context: Context, private val textureView: Textu
     
     private var currentPreviewSize: Size? = null
 
+    /** 返回相机传感器相对于设备自然方向的旋转角度（通常为 90 或 270）*/
+    fun getSensorOrientation(): Int = sensorOrientation
+
     private fun openCamera(width: Int, height: Int) {
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as AndroidCameraManager
         try {
@@ -135,9 +138,15 @@ class CameraManager(private val context: Context, private val textureView: Textu
     }
 
     private fun chooseOptimalSize(choices: Array<Size>, width: Int, height: Int): Size {
-        val targetRatio = if (height > 0) width.toFloat() / height.toFloat() else 1.77f
+        // 统一使用 landscape 比例（长边/短边），避免竖屏与横屏尺寸混用导致比较错误
+        val maxDim = maxOf(width, height).toFloat()
+        val minDim = minOf(width, height).toFloat()
+        val targetRatio = if (minDim > 0) maxDim / minDim else 1.77f
         return choices.filter { it.width <= 1920 && it.height <= 1080 }
-            .minByOrNull { Math.abs((it.height.toFloat() / it.width.toFloat()) - targetRatio) } ?: choices[0]
+            .minByOrNull { c ->
+                val cRatio = maxOf(c.width, c.height).toFloat() / minOf(c.width, c.height).toFloat()
+                Math.abs(cRatio - targetRatio)
+            } ?: choices[0]
     }
 
     private fun adjustTextureViewAspectRatio(targetRatio: Float) {

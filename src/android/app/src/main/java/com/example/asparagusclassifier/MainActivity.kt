@@ -111,13 +111,21 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         
         val bitmap = textureView.getBitmap()
         if (bitmap != null) {
-            lastBitmap = bitmap
-            Log.i("MainActivity", "Bitmap尺寸: ${bitmap.width}x${bitmap.height}")
+            // getBitmap() 返回的是 TextureView 的原始像素，未应用 setTransform 的旋转变换。
+            // 必须根据传感器方向手动旋转，才能保证 OpenCV 自延接正确方向的图像
+            val sensorRot = cameraManager.getSensorOrientation()
+            val correctedBitmap = if (sensorRot != 0) {
+                val matrix = android.graphics.Matrix()
+                matrix.postRotate(sensorRot.toFloat())
+                Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            } else {
+                bitmap
+            }
+            lastBitmap = correctedBitmap
+            Log.i("MainActivity", "原始 Bitmap尺寸: ${bitmap.width}x${bitmap.height}, 传感器旋转: ${sensorRot}°")
+            Log.i("MainActivity", "修正后 Bitmap尺寸: ${correctedBitmap.width}x${correctedBitmap.height}")
             Log.i("MainActivity", "TextureView尺寸: ${textureView.width}x${textureView.height}")
             Log.i("MainActivity", "OverlayView尺寸: ${overlayView.width}x${overlayView.height}")
-            
-            Log.i("MainActivity", "OverlayView尺寸: ${overlayView.width}x${overlayView.height}")
-            
         } else {
             Log.e("MainActivity", "无法获取图像")
             tvResult.text = "错误: 无法获取图像"
@@ -125,11 +133,11 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         }
         
         // 如果识别失败，则保存当前 Bitmap 用于调试
-        if (bitmap != null) {
-            val result = AlgorithmProcessor.processImage(bitmap)
+        if (lastBitmap != null) {
+            val result = AlgorithmProcessor.processImage(lastBitmap!!)
             if (!result.success) {
                 Log.w("MainActivity", "识别失败，正在保存调试图片...")
-                saveDebugImage(bitmap)
+                saveDebugImage(lastBitmap!!)
             }
             displayResult(result)
         }
@@ -148,6 +156,16 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                 com.example.asparagusclassifier.ui.ArucoMarker(corners, id)
             }
             Log.d(TAG, "设置标记: Bitmap尺寸=${lastBitmap!!.width}x${lastBitmap!!.height}, View尺寸=${overlayView.width}x${overlayView.height}")
+
+            // 把 TextureView 相对于 OverlayView 的实际显示区域传进去，
+            // 这样覆盖层的坐标映射才能和预览画面完全对齐
+            val tvLeft = textureView.left.toFloat()
+            val tvTop = textureView.top.toFloat()
+            val tvRight = textureView.right.toFloat()
+            val tvBottom = textureView.bottom.toFloat()
+            overlayView.setDisplayRect(tvLeft, tvTop, tvRight, tvBottom)
+            Log.d(TAG, "TextureView 位置: left=$tvLeft, top=$tvTop, right=$tvRight, bottom=$tvBottom")
+
             // 关键修改：使用 Bitmap 的实际尺寸，由 OverlayView 负责映射到 View 尺寸
             overlayView.setArucoMarkers(markers, lastBitmap!!.width, lastBitmap!!.height)
             overlayView.visibility = View.VISIBLE
