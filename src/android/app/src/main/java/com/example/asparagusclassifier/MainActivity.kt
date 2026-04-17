@@ -268,8 +268,15 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         return when (item.itemId) {
             R.id.action_about -> {
                 android.app.AlertDialog.Builder(this)
-                    .setTitle("关于")
-                    .setMessage("冯氏芦笋工具 (2026年4月)\n\n研发人：冯树民\n微信号：13306400990")
+                    .setTitle("冯氏芦笋工具")
+                    .setMessage("山东卷积分公司\n2026年4月")
+                    .setNeutralButton("下载校准图纸") { _, _ ->
+                        val intent = android.content.Intent(
+                            android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse("http://voicevon.vicp.io:7001/nc/index.php/s/pFMFmrWaT9CWpt4/download")
+                        )
+                        startActivity(intent)
+                    }
                     .setPositiveButton("确定", null)
                     .show()
                 true
