@@ -201,8 +201,11 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
 
             // 4. 更新 UI 必须切回主线程
             runOnUiThread {
-                lastBitmap = correctedBitmap
-                lastSensorRotation = 0 // 已在位图级对齐，无需矩阵再次旋转
+                // 如果算法返回了去畸变后的图 (Canvas 2)，则用它作为后续显示的基准
+                val finalDisplayBitmap = result.processedBitmap ?: correctedBitmap
+                lastBitmap = finalDisplayBitmap
+                lastSensorRotation = 0 // 已在位图层级对齐
+                
                 if (!result.success) {
                     Log.e("MainActivity", "识别失败: ${result.error}")
                 }
