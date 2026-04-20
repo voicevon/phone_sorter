@@ -23,7 +23,18 @@ object AsparagusVisionCore {
         val axisPoints: List<PointF> = emptyList(),
         val purpleRootPoint: PointF? = null,
         val diameterLines: List<List<PointF>> = emptyList(),
+        val straightnessOverall: Double = 0.0,
+        val straightnessHead: Double = 0.0,
+        val straightnessTail: Double = 0.0,
+        val baselineOverall: List<PointF>? = null,
+        val baselineHead: List<PointF>? = null,
+        val baselineTail: List<PointF>? = null,
         val error: String? = null
+    )
+    
+    data class StraightnessResult(
+        val rmse: Double,
+        val endpoints: List<PointF> // 基准线的起止点
     )
 
     /**
@@ -108,6 +119,32 @@ object AsparagusVisionCore {
                     rawDiameterMm = diameterSamples.average()
                 }
             }
+            
+            // 4. 直线度分析 (RMSE 偏离值，单位为像素，后续转成 mm)
+            var sOverall = 0.0
+            var sHead = 0.0
+            var sTail = 0.0
+            var bOverall: List<PointF>? = null
+            var bHead: List<PointF>? = null
+            var bTail: List<PointF>? = null
+            
+            if (orientedAxis.size >= 4) {
+                val resOverall = computeStraightness(orientedAxis)
+                sOverall = resOverall.rmse / pixelsPerMm
+                bOverall = resOverall.endpoints
+                
+                // 截取头尾段 (各占 25%)
+                val segmentSize = orientedAxis.size / 4
+                val resHead = computeStraightness(orientedAxis.take(segmentSize))
+                val resTail = computeStraightness(orientedAxis.takeLast(segmentSize))
+                
+                sHead = resHead.rmse / pixelsPerMm
+                sTail = resTail.rmse / pixelsPerMm
+                bHead = resHead.endpoints
+                bTail = resTail.endpoints
+                
+                Log.i(TAG, "直线度计算完成: 整体=%.2f, 头=%.2f, 尾=%.2f".format(sOverall, sHead, sTail))
+            }
 
             val correctedDiameter = maxOf(0.0, rawDiameterMm - AlgorithmConfig.DIAMETER_CORRECTION_MM)
             val grade = calculateGrade(correctedDiameter)
@@ -121,7 +158,13 @@ object AsparagusVisionCore {
                 contourPoints = contourPoints,
                 axisPoints = orientedAxis,
                 purpleRootPoint = purplePoint?.let { PointF(it.x.toFloat(), it.y.toFloat()) },
-                diameterLines = diameterLines
+                diameterLines = diameterLines,
+                straightnessOverall = sOverall,
+                straightnessHead = sHead,
+                straightnessTail = sTail,
+                baselineOverall = bOverall,
+                baselineHead = bHead,
+                baselineTail = bTail
             )
 
         } finally {
@@ -204,23 +247,33 @@ object AsparagusVisionCore {
     }
 
     private fun orientAxis(axis: List<PointF>, purple: Point?, mask: Mat): List<PointF> {
-        if (axis.size < 2) return axis
+        if (axis.size < 4) return axis
         
-        val needsReverse = if (purple != null) {
+        var needsReverse = false
+        
+        if (purple != null) {
+            // 逻辑 A: 颜色判向 (最高优先级)
             val dFirst = dist(axis.first(), PointF(purple.x.toFloat(), purple.y.toFloat()))
             val dLast = dist(axis.last(), PointF(purple.x.toFloat(), purple.y.toFloat()))
-            dLast < dFirst
+            needsReverse = dLast < dFirst
         } else {
-            // 密度判向
-            val sampleCount = maxOf(3, axis.size / 10)
+            // 逻辑 B: 直线度与密度综合判向 (TailScore = Density / (RMSE + 1))
+            val segmentSize = axis.size / 4
+            val headSeg = axis.take(segmentSize)
+            val tailSeg = axis.takeLast(segmentSize)
+            
+            // 1. 直线度比较
+            val sHead = computeStraightness(headSeg).rmse
+            val sTail = computeStraightness(tailSeg).rmse
+            
+            // 2. 密度（粗度）比较
             val R = 20
             fun density(pt: PointF): Double {
                 var cnt = 0
                 for (dy in -R..R) {
                     for (dx in -R..R) {
                         if (dx*dx + dy*dy > R*R) continue
-                        val px = (pt.x + dx).toInt()
-                        val py = (pt.y + dy).toInt()
+                        val px = (pt.x + dx).toInt(); val py = (pt.y + dy).toInt()
                         if (px in 0 until mask.cols() && py in 0 until mask.rows()) {
                             if (mask.get(py, px)[0] > 0) cnt++
                         }
@@ -228,12 +281,82 @@ object AsparagusVisionCore {
                 }
                 return cnt.toDouble()
             }
-            val dFirst = axis.take(sampleCount).map { density(it) }.average()
-            val dLast = axis.takeLast(sampleCount).map { density(it) }.average()
-            dLast > dFirst
+            val dHead = headSeg.map { density(it) }.average()
+            val dTail = tailSeg.map { density(it) }.average()
+            
+            // 计算 TailScore：分值越高越可能是尾部
+            val scoreAtStart = dHead / (sHead + 1.0)
+            val scoreAtEnd = dTail / (sTail + 1.0)
+            
+            // 如果开始位置得分高于结束位置，说明物理尾部在开始，需要反转以符合 [Head -> Tail] 结构
+            needsReverse = scoreAtStart > scoreAtEnd
+            
+            Log.d(TAG, "智能判向诊断: 开始端(Score=%.2f, D=%.1f, S=%.2f), 结束端(Score=%.2f, D=%.1f, S=%.2f) -> Reverse=$needsReverse"
+                .format(scoreAtStart, dHead, sHead, scoreAtEnd, dTail, sTail))
         }
         
         return if (needsReverse) axis.reversed() else axis
+    }
+
+    /**
+     * 计算一组点的直线度 (RMSE) 及其基准拟合线
+     * 使用最小二乘法 (Total Least Squares) 拟合 2D 直线
+     */
+    private fun computeStraightness(points: List<PointF>): StraightnessResult {
+        if (points.size < 2) return StraightnessResult(0.0, emptyList())
+        
+        val n = points.size
+        var avgX = 0f; var avgY = 0f
+        points.forEach { avgX += it.x; avgY += it.y }
+        avgX /= n; avgY /= n
+        
+        var sxx = 0.0; var syy = 0.0; var sxy = 0.0
+        points.forEach {
+            val dx = it.x - avgX; val dy = it.y - avgY
+            sxx += dx * dx; syy += dy * dy; sxy += dx * dy
+        }
+        
+        // 特征值分解
+        val det = sxx - syy
+        val distValue = sqrt(det * det + 4 * sxy * sxy)
+        
+        // 方向向量 (vx, vy)
+        val vx: Double
+        val vy: Double
+        
+        if (distValue < 1e-10) {
+            // 所有点重合或极度对称，无唯一基准线
+            return StraightnessResult(0.0, emptyList())
+        } else {
+            // 特征向量对应最大特征值
+            val mag = sqrt((det + distValue) * (det + distValue) + 4 * sxy * sxy)
+            vx = (det + distValue) / mag
+            vy = (2.0 * sxy) / mag
+        }
+        
+        // 法向量 (nx, ny)
+        val nx = -vy
+        val ny = vx
+        
+        var sumDistSq = 0.0
+        val projections = mutableListOf<Double>()
+        points.forEach {
+            val dx = it.x - avgX; val dy = it.y - avgY
+            // 正交距离
+            val d = dx * nx + dy * ny
+            sumDistSq += d * d
+            // 沿直线投影距离，用于生成基准线起止点
+            projections.add(dx * vx + dy * vy)
+        }
+        
+        val minP = projections.minOrNull() ?: 0.0
+        val maxP = projections.maxOrNull() ?: 0.0
+        val endpoints = listOf(
+            PointF((avgX + vx * minP).toFloat(), (avgY + vy * minP).toFloat()),
+            PointF((avgX + vx * maxP).toFloat(), (avgY + vy * maxP).toFloat())
+        )
+        
+        return StraightnessResult(sqrt(sumDistSq / n), endpoints)
     }
 
     private fun findPointAndNormalAtDistance(path: List<PointF>, targetDist: Double): Pair<Point?, Point?> {

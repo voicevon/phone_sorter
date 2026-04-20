@@ -103,7 +103,12 @@ graph TD
 2.  **用户告知**：弹出一次性对话框告知可能存在 10%-15% 的精度偏差。
 3.  **模式切换**：停止 Canvas 2 的纠偏计算，直接从 Canvas 1 映射至 Canvas 3。
 
-### 7.2 MQTT 上报详情
+### 7.2 多镜头动态同步与兜底机制
+核心目标是防止多镜头切换导致的参数偏移：
+1.  **逐帧同步**：系统优先从每一帧的 `CaptureResult` 中提取实时的 `LENS_INTRINSIC_CALIBRATION`。
+2.  **物理参数兜底**：若设备不公开标定参数，系统将利用 `SENSOR_INFO_PHYSICAL_SIZE` 和 `LENS_INFO_AVAILABLE_FOCAL_LENGTHS` 计算估算内参。
+
+### 7.3 MQTT 上报详情
 - **Broker**: `voicevon.vicp.io:1883`
 - **Topic**: `phone_sorter/${brand}/${type}/0/result`
 

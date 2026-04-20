@@ -381,7 +381,13 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         val rawStr = String.format(java.util.Locale.US, "%.1f", result.rawDiameter)
         val timeStr = String.format(java.util.Locale.US, "%.2f", result.executionTimeMs / 1000.0)
         
-        val plainText = "直径: $diameterStr mm (raw: $rawStr)\n长度: ${result.length.toInt()} mm  [耗时: ${timeStr}s]"
+        val sOverall = String.format(java.util.Locale.US, "%.1f", result.straightnessOverall)
+        val sHead = String.format(java.util.Locale.US, "%.1f", result.straightnessHead)
+        val sTail = String.format(java.util.Locale.US, "%.1f", result.straightnessTail)
+
+        val plainText = "直径: $diameterStr mm (raw: $rawStr)\n" +
+                         "长度: ${result.length.toInt()} mm\n" +
+                         "直线度: $sOverall mm (头:$sHead, 尾:$sTail) [耗时: ${timeStr}s]"
         
         val spannable = SpannableString(plainText)
         val rawStart = plainText.indexOf("(raw:")
@@ -389,6 +395,15 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             val rawEnd = plainText.indexOf(")", rawStart) + 1
             spannable.setSpan(RelativeSizeSpan(0.6f), rawStart, rawEnd, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
             spannable.setSpan(StyleSpan(Typeface.NORMAL), rawStart, rawEnd, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        
+        // 渲染直线度详情 (头尾)
+        val sHeadStart = plainText.indexOf("(头:")
+        if (sHeadStart >= 0) {
+            val sTailEnd = plainText.indexOf(")", sHeadStart) + 1
+            spannable.setSpan(RelativeSizeSpan(0.6f), sHeadStart, sTailEnd, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            spannable.setSpan(StyleSpan(Typeface.NORMAL), sHeadStart, sTailEnd, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            spannable.setSpan(android.text.style.ForegroundColorSpan(android.graphics.Color.LTGRAY), sHeadStart, sTailEnd, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
         
         // 耗时文本设为灰色并缩小
@@ -445,8 +460,9 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                         overlayView.setAsparagusTail(result.tailPoint)
                         overlayView.setDiameterLines(result.diameterLine)
                         overlayView.setAxisPath(result.axisPath)
+                        overlayView.setBaselines(result.baselineOverall, result.baselineHead, result.baselineTail)
+                        overlayView.visibility = View.VISIBLE
                     }
-                    overlayView.visibility = View.VISIBLE
                 }
             }
             3 -> {

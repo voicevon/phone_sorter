@@ -79,20 +79,25 @@ class CameraManager(private val context: Context, private val textureView: Textu
             val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) as StreamConfigurationMap
             sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
             
-            // 提取畸变参数和内参 (Phase 2)
+            // 1. 优先尝试读取官方预设的标定参数
             try {
                 val distortion = characteristics.get(CameraCharacteristics.LENS_DISTORTION)
                 val intrinsic = characteristics.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
                 val pixelArraySize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
                 
-                if (distortion != null && intrinsic != null && pixelArraySize != null) {
+                if (distortion != null && intrinsic != null && pixelArraySize != null && (intrinsic[0] != 0f || intrinsic[1] != 0f)) {
                     lastCalibration = com.example.asparagusclassifier.algorithm.CalibrationData(
                         intrinsic, distortion, pixelArraySize.width, pixelArraySize.height
                     )
-                    Log.i("CameraManager", "读取到标定参数，传感器分辨率: ${pixelArraySize.width}x${pixelArraySize.height}")
+                    Log.i("CameraManager", "读取到原始标定参数，传感器分辨率: ${pixelArraySize.width}x${pixelArraySize.height}")
+                } else {
+                    // 2. 兜底方案：如果官方数据缺失，利用传感器规格进行启发式计算
+                    lastCalibration = estimateCalibrationFallback(characteristics)
+                    Log.w("CameraManager", "官方参数缺失，已切换至“物理规格估算”模式")
                 }
             } catch (e: Exception) {
-                Log.w("CameraManager", "无法读取畸变参数: ${e.message}")
+                Log.e("CameraManager", "标定初始化失败，尝试兜底: ${e.message}")
+                lastCalibration = estimateCalibrationFallback(characteristics)
             }
             
             val outputSizes = map.getOutputSizes(SurfaceTexture::class.java)
@@ -216,7 +221,7 @@ class CameraManager(private val context: Context, private val textureView: Textu
                     captureSession = session
                     builder?.let { 
                         it.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                        session.setRepeatingRequest(it.build(), null, null) 
+                        session.setRepeatingRequest(it.build(), captureCallback, null) 
                         Log.d("DiagCamera", "RepeatingRequest 已发送")
                     }
                 }
@@ -227,6 +232,66 @@ class CameraManager(private val context: Context, private val textureView: Textu
         } catch (e: Exception) {
             Log.e("CameraManager", "会话创建失败: ${e.message}")
         }
+    }
+
+    /**
+     * 逐帧回调：确保多镜头手机在镜头切换（如广角/超广角切换）时，标定参数能够实时同步。
+     */
+    private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: android.hardware.camera2.TotalCaptureResult) {
+            val intrinsic = result.get(android.hardware.camera2.CaptureResult.LENS_INTRINSIC_CALIBRATION)
+            val distortion = result.get(android.hardware.camera2.CaptureResult.LENS_DISTORTION)
+            
+            // 只有当参数有效且发生变化时才更新，减少 UI 抖动
+            if (intrinsic != null && (intrinsic[0] != 0f || intrinsic[1] != 0f)) {
+                val currentIds = lastCalibration
+                // 注意：TotalCaptureResult 通常不带 SENSOR_INFO_PIXEL_ARRAY_SIZE，我们保持原有分辨率设定
+                if (currentIds == null || !intrinsic.contentEquals(currentIds.intrinsic)) {
+                    Log.i("CameraManager", "检测到镜头参数动态变化 (多镜头同步成功)")
+                    lastCalibration = com.example.asparagusclassifier.algorithm.CalibrationData(
+                        intrinsic, distortion ?: FloatArray(5), 
+                        currentIds?.sensorWidth ?: 1920, currentIds?.sensorHeight ?: 1080
+                    )
+                    // 同步到 UI 状态
+                    onSizeInfoListener?.onSizeInfoReceived(
+                        currentIds?.sensorWidth ?: 1920, currentIds?.sensorHeight ?: 1080, 1.77f,
+                        textureView.width, textureView.height, 1.77f, lastCalibration
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * 物理规格估算：针对不公开内参的劣质/非标驱动，利用传感器物理尺寸和焦距反向推导 fx, fy。
+     */
+    private fun estimateCalibrationFallback(characteristics: CameraCharacteristics): com.example.asparagusclassifier.algorithm.CalibrationData {
+        val pixelArraySize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+        val sensorSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+        val focalLengths = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+        
+        val w = pixelArraySize?.width ?: 1920
+        val h = pixelArraySize?.height ?: 1080
+        
+        if (sensorSize != null && focalLengths != null && focalLengths.isNotEmpty()) {
+            val f_mm = focalLengths[0]
+            val fx = f_mm * w / sensorSize.width
+            val fy = f_mm * h / sensorSize.height
+            val cx = w / 2f
+            val cy = h / 2f
+            Log.w("CameraManager", "执行物理推导：f=${f_mm}mm, fx=${fx}, cx=${cx}")
+            
+            return com.example.asparagusclassifier.algorithm.CalibrationData(
+                floatArrayOf(fx, fy, cx, cy, 0f), 
+                floatArrayOf(0f, 0f, 0f, 0f, 0f), // 估算模式不提供畸变校正
+                w, h
+            )
+        }
+        
+        // 最终垫底（不标定模式）
+        return com.example.asparagusclassifier.algorithm.CalibrationData(
+            floatArrayOf(0f, 0f, 0f, 0f, 0f), floatArrayOf(0f, 0f, 0f, 0f, 0f), w, h
+        )
     }
 
     fun release() {

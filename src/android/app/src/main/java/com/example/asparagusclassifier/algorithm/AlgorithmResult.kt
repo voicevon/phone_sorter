@@ -21,6 +21,12 @@ data class AlgorithmResult(
     val arucoCorners: List<Array<PointF>>? = null, // 每个标记的4个角点
     val arucoIds: List<Int>? = null,
     val executionTimeMs: Long = 0,
+    val straightnessOverall: Double = 0.0,
+    val straightnessHead: Double = 0.0,
+    val straightnessTail: Double = 0.0,
+    val baselineOverall: List<PointF>? = null, // 拟合基准线
+    val baselineHead: List<PointF>? = null,
+    val baselineTail: List<PointF>? = null,
     val processedBitmap: android.graphics.Bitmap? = null, // 当前视图位图 (C1/C2/C3)
     val canvas1Bitmap: android.graphics.Bitmap? = null, // 原始
     val canvas2Bitmap: android.graphics.Bitmap? = null, // 去畸变

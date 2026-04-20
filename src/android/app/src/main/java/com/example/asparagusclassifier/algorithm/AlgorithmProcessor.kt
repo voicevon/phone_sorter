@@ -134,7 +134,10 @@ object AlgorithmProcessor {
             var finalAxis = visionResult.axisPoints
             var finalTail = visionResult.purpleRootPoint
             var finalDiameterLines = visionResult.diameterLines
-
+            var finalBaselineOverall = visionResult.baselineOverall
+            var finalBaselineHead = visionResult.baselineHead
+            var finalBaselineTail = visionResult.baselineTail
+            
             if (viewMode == 3 && transMat != null) {
                 // 将标记点从 C2 投影到 C3 (用于标准分析视图叠加)
                 finalArucoCorners = arucoCorners.map { corners ->
@@ -148,12 +151,15 @@ object AlgorithmProcessor {
                 }
             } else if (viewMode == 2 && mapper != null) {
                 // 反透视变换：将分析结果从 C3 投影回 C2 (用于去畸变视图叠加)
-                finalContour = visionResult.contourPoints.map { mapper!!.mapWarpedToWork(it) }
-                finalAxis = visionResult.axisPoints.map { mapper!!.mapWarpedToWork(it) }
-                finalTail = visionResult.purpleRootPoint?.let { mapper!!.mapWarpedToWork(it) }
+                finalContour = visionResult.contourPoints.map { mapper.mapWarpedToWork(it) }
+                finalAxis = visionResult.axisPoints.map { mapper.mapWarpedToWork(it) }
+                finalTail = visionResult.purpleRootPoint?.let { mapper.mapWarpedToWork(it) }
                 finalDiameterLines = visionResult.diameterLines.map { line ->
-                    line.map { mapper!!.mapWarpedToWork(it) }
+                    line.map { mapper.mapWarpedToWork(it) }
                 }
+                finalBaselineOverall = visionResult.baselineOverall?.map { mapper.mapWarpedToWork(it) }
+                finalBaselineHead = visionResult.baselineHead?.map { mapper.mapWarpedToWork(it) }
+                finalBaselineTail = visionResult.baselineTail?.map { mapper.mapWarpedToWork(it) }
             }
 
             // --- Step 5: 结果构造 ---
@@ -178,6 +184,12 @@ object AlgorithmProcessor {
                 rawDiameter = visionResult.rawDiameterMm,
                 length = visionResult.lengthMm,
                 executionTimeMs = duration,
+                straightnessOverall = visionResult.straightnessOverall,
+                straightnessHead = visionResult.straightnessHead,
+                straightnessTail = visionResult.straightnessTail,
+                baselineOverall = finalBaselineOverall,
+                baselineHead = finalBaselineHead,
+                baselineTail = finalBaselineTail,
                 
                 // 坐标返回：根据视图模式已同步
                 asparagusContour = finalContour,

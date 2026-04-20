@@ -69,11 +69,23 @@ class OverlayView @JvmOverloads constructor(
         style = Paint.Style.FILL
     }
     
+    // 红色半透明点划线用于基准拟合线 (调试诊断用)
+    private val baselinePaint = Paint().apply {
+        color = Color.RED
+        style = Paint.Style.STROKE
+        strokeWidth = 3f
+        alpha = 160
+        pathEffect = DashPathEffect(floatArrayOf(15f, 15f), 0f)
+    }
+    
     private var asparagusRect: Rect? = null
     private var asparagusContour: List<PointF>? = null
     private var tailPoint: PointF? = null
     private var axisPath: List<PointF>? = null
     private var diameterLines: List<List<PointF>>? = null
+    private var baselineOverall: List<PointF>? = null
+    private var baselineHead: List<PointF>? = null
+    private var baselineTail: List<PointF>? = null
     private var arucoMarkers: List<ArucoMarker>? = null
     private var bitmapWidth: Int = 0
     private var bitmapHeight: Int = 0
@@ -110,6 +122,13 @@ class OverlayView @JvmOverloads constructor(
         axisPath = path
         invalidate()
     }
+
+    fun setBaselines(overall: List<PointF>?, head: List<PointF>?, tail: List<PointF>?) {
+        baselineOverall = overall
+        baselineHead = head
+        baselineTail = tail
+        invalidate()
+    }
     
     fun setArucoMarkers(markers: List<ArucoMarker>, bitmapW: Int, bitmapH: Int, sensorRot: Int = 0) {
         arucoMarkers = markers
@@ -132,6 +151,9 @@ class OverlayView @JvmOverloads constructor(
         tailPoint = null
         axisPath = null
         diameterLines = null
+        baselineOverall = null
+        baselineHead = null
+        baselineTail = null
         backgroundBitmap = null
         invalidate()
     }
@@ -270,6 +292,20 @@ class OverlayView @JvmOverloads constructor(
             // 绘制黄色空心圆
             val radius = 25f
             canvas.drawCircle(pointBuffer[0], pointBuffer[1], radius, tailMarkerPaint)
+        }
+
+        drawLineSegment(baselineOverall, canvas, baselinePaint)
+        drawLineSegment(baselineHead, canvas, baselinePaint)
+        drawLineSegment(baselineTail, canvas, baselinePaint)
+    }
+    
+    private fun drawLineSegment(points: List<PointF>?, canvas: Canvas, paint: Paint) {
+        if (points != null && points.size >= 2) {
+            val p1 = floatArrayOf(points[0].x, points[0].y)
+            val p2 = floatArrayOf(points[1].x, points[1].y)
+            coordinateMatrix.mapPoints(p1)
+            coordinateMatrix.mapPoints(p2)
+            canvas.drawLine(p1[0], p1[1], p2[0], p2[1], paint)
         }
     }
 }
