@@ -128,6 +128,10 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             }
         }
         
+        findViewById<Button>(R.id.btnShowDiag).setOnClickListener {
+            lastResult?.let { showDiagnosticDialog(it) }
+        }
+        
         // 权限检查和启动逻辑已移至 onResume
     }
 
@@ -198,6 +202,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     }
 
     private var lastBitmap: Bitmap? = null
+    private var lastResult: AlgorithmResult? = null // 保存最近一次分析结果用于诊断图
     private var lastSensorRotation: Int = 0
 
     override fun onCreateOptionsMenu(menu: Menu?): Boolean {
@@ -338,6 +343,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                 if (!result.success) {
                     Log.e("MainActivity", "识别失败: ${result.error}")
                 }
+                lastResult = result
                 displayResult(result)
                 // 恢复按钮状态
                 btnCapture.isEnabled = true
@@ -534,4 +540,89 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         }
         cameraManager.release()
     }
-}
+    /**
+     * 弹出诊断对话框，并列展示头、中、尾拉直后的对比图
+     */
+    private fun showDiagnosticDialog(result: AlgorithmResult) {
+        val strips = result.diagStrips ?: return
+        if (strips.isEmpty()) return
+        
+        val context = this
+        val dialog = android.app.AlertDialog.Builder(context, android.R.style.Theme_Material_NoActionBar_Fullscreen).create()
+        
+        val root = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setBackgroundColor(android.graphics.Color.BLACK)
+            setPadding(32, 64, 32, 32)
+        }
+        
+        // 标题栏
+        val header = android.widget.RelativeLayout(context).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, 48) }
+        }
+        val title = android.widget.TextView(context).apply {
+            text = "直线度深度诊断 (拉直对比图)"
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 22f
+            setTypeface(null, Typeface.BOLD)
+        }
+        val close = android.widget.Button(context).apply {
+            text = "关闭诊断"
+            setBackgroundColor(android.graphics.Color.DKGRAY)
+            setTextColor(android.graphics.Color.WHITE)
+            setOnClickListener { dialog.dismiss() }
+        }
+        header.addView(title)
+        val lpClose = android.widget.RelativeLayout.LayoutParams(-2, -2).apply { addRule(android.widget.RelativeLayout.ALIGN_PARENT_END) }
+        header.addView(close, lpClose)
+        root.addView(header)
+        
+        // 水平滚动容器
+        val scroll = android.widget.HorizontalScrollView(context).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(-1, -1)
+            isFillViewport = true
+        }
+        val container = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER
+        }
+        
+        val labels = listOf("头段 (首25%)", "整体区域分析", "尾段 (末25%)")
+        strips.forEachIndexed { index, bitmap ->
+            val itemWrapper = android.widget.LinearLayout(context).apply {
+                orientation = android.widget.LinearLayout.VERTICAL
+                setPadding(24, 0, 24, 0)
+                gravity = android.view.Gravity.CENTER_HORIZONTAL
+            }
+            
+            val labelText = android.widget.TextView(context).apply {
+                text = labels.getOrElse(index) { "区域$index" }
+                setTextColor(android.graphics.Color.YELLOW)
+                textSize = 16f
+                setPadding(0, 0, 0, 24)
+            }
+            
+            val img = android.widget.ImageView(context).apply {
+                setImageBitmap(bitmap)
+                adjustViewBounds = true
+                scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                layoutParams = android.widget.LinearLayout.LayoutParams(-2, -1).apply { 
+                    weight = 1f
+                    setMargins(0, 0, 0, 40)
+                }
+                setBackgroundColor(android.graphics.Color.parseColor("#222222"))
+                setPadding(2, 2, 2, 2)
+            }
+            
+            itemWrapper.addView(labelText)
+            itemWrapper.addView(img)
+            container.addView(itemWrapper)
+        }
+        
+        scroll.addView(container)
+        root.addView(scroll)
+        
+        dialog.setView(root)
+        dialog.show()
+    }
+}

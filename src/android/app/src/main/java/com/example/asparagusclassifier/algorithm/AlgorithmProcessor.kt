@@ -191,6 +191,9 @@ object AlgorithmProcessor {
                 baselineHead = finalBaselineHead,
                 baselineTail = finalBaselineTail,
                 
+                // 生成诊断条图
+                diagStrips = generateDiagnosticStrips(warpedRgba, visionResult),
+                
                 // 坐标返回：根据视图模式已同步
                 asparagusContour = finalContour,
                 axisPath = finalAxis,
@@ -268,5 +271,61 @@ object AlgorithmProcessor {
         var x = 0f; var y = 0f
         for (p in corners) { x += p.x; y += p.y }
         return PointF(x / 4f, y / 4f)
+    }
+    /**
+     * 生成头、中、尾三段诊断对比图
+     */
+    private fun generateDiagnosticStrips(canvas3: Mat, vision: AsparagusVisionCore.AnalysisResult): List<Bitmap> {
+        val strips = mutableListOf<Bitmap>()
+        if (vision.axisPoints.size < 8) return emptyList()
+
+        val segmentSize = vision.axisPoints.size / 4
+        val tasks = listOf(
+            Triple(vision.axisPoints.take(segmentSize), vision.baselineHead, "头部"),
+            Triple(vision.axisPoints, vision.baselineOverall, "整体"),
+            Triple(vision.axisPoints.takeLast(segmentSize), vision.baselineTail, "尾部")
+        )
+
+        tasks.forEach { (axis, baseline, _) ->
+            generateDiagnosticStrip(canvas3, axis, baseline)?.let { strips.add(it) }
+        }
+        return strips
+    }
+
+    private fun generateDiagnosticStrip(sourceMat: Mat, axis: List<PointF>, baseline: List<PointF>?): Bitmap? {
+        if (baseline == null || baseline.size < 2 || axis.isEmpty()) return null
+        val p1 = baseline[0]; val p2 = baseline[1]
+        val dx = (p2.x - p1.x).toDouble(); val dy = (p2.y - p1.y).toDouble()
+        val lineLen = Math.sqrt(dx * dx + dy * dy); val angle = Math.atan2(dy, dx) * 180.0 / Math.PI
+        
+        val stripW = 240; val stripH = (lineLen + 100).toInt()
+        val targetMat = Mat(stripH, stripW, sourceMat.type(), Scalar(30.0, 30.0, 30.0, 255.0))
+        val cx = (p1.x + p2.x) / 2.0; val cy = (p1.y + p2.y) / 2.0
+        val rotationAngle = -90.0 - angle
+        val rotMat = Imgproc.getRotationMatrix2D(Point(cx, cy), rotationAngle, 1.0)
+        
+        val m = DoubleArray(6)
+        rotMat.get(0, 0, m)
+        m[2] += (stripW / 2.0 - (m[0] * cx + m[1] * cy + m[2]))
+        m[5] += (stripH / 2.0 - (m[3] * cx + m[4] * cy + m[5]))
+        rotMat.put(0, 0, *m)
+        
+        Imgproc.warpAffine(sourceMat, targetMat, rotMat, targetMat.size(), Imgproc.INTER_LINEAR, Core.BORDER_CONSTANT, Scalar(0.0, 0.0, 0.0, 255.0))
+        
+        val b1 = Point(m[0] * p1.x + m[1] * p1.y + m[2], m[3] * p1.x + m[4] * p1.y + m[5])
+        val b2 = Point(m[0] * p2.x + m[1] * p2.y + m[2], m[3] * p2.x + m[4] * p2.y + m[5])
+        Imgproc.line(targetMat, b1, b2, Scalar(255.0, 50.0, 50.0, 255.0), 3)
+        
+        var prevP: Point? = null
+        for (pt in axis) {
+            val currP = Point(m[0] * pt.x + m[1] * pt.y + m[2], m[3] * pt.x + m[4] * pt.y + m[5])
+            if (prevP != null) Imgproc.line(targetMat, prevP, currP, Scalar(0.0, 100.0, 255.0, 255.0), 4)
+            prevP = currP
+        }
+        
+        val bmp = Bitmap.createBitmap(targetMat.cols(), targetMat.rows(), Bitmap.Config.ARGB_8888)
+        Utils.matToBitmap(targetMat, bmp)
+        targetMat.release(); rotMat.release()
+        return bmp
     }
 }

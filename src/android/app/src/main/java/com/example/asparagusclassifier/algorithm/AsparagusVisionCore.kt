@@ -288,10 +288,12 @@ object AsparagusVisionCore {
             val scoreAtStart = dHead / (sHead + 1.0)
             val scoreAtEnd = dTail / (sTail + 1.0)
             
-            // 如果开始位置得分高于结束位置，说明物理尾部在开始，需要反转以符合 [Head -> Tail] 结构
-            needsReverse = scoreAtStart > scoreAtEnd
+            // 核心修复：测量逻辑（如直径采样偏移）是从 axis.first() 开始计算的。
+            // 因此，得分更高的一端（即物理尾部）必须位于列表开头（Index 0）。
+            // 如果末尾端的得分高于起始端，说明物理尾部在末尾，需要执行反转。
+            needsReverse = scoreAtEnd > scoreAtStart
             
-            Log.d(TAG, "智能判向诊断: 开始端(Score=%.2f, D=%.1f, S=%.2f), 结束端(Score=%.2f, D=%.1f, S=%.2f) -> Reverse=$needsReverse"
+            Log.d(TAG, "智能判向诊断: 开始端(Score=%.2f, D=%.1f, S=%.2f), 结束端(Score=%.2f, D=%.1f, S=%.2f) -> NeedsReverse=$needsReverse"
                 .format(scoreAtStart, dHead, sHead, scoreAtEnd, dTail, sTail))
         }
         
