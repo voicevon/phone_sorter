@@ -9,6 +9,7 @@ import org.opencv.objdetect.*
 import org.opencv.imgproc.Imgproc
 import kotlin.math.sqrt
 import kotlin.math.abs
+import org.opencv.calib3d.Calib3d
 import android.graphics.PointF
 
 data class AlgorithmResult(
@@ -32,6 +33,19 @@ object AlgorithmProcessor {
     private const val TAG = "AsparagusClassifier"
     // 假设 ArUco 标记的物理尺寸为 25mm
     private const val ARUCO_SIZE_MM = 25.0 
+
+    // 相机校准数据 (Phase 2)
+    private var intrinsicCalibration: FloatArray? = null
+    private var lensDistortion: FloatArray? = null
+
+    /**
+     * 由 CameraManager 调用，传入当前镜头的物理参数
+     */
+    fun setCalibrationData(intrinsic: FloatArray, distortion: FloatArray) {
+        this.intrinsicCalibration = intrinsic
+        this.lensDistortion = distortion
+        Log.i(TAG, "已更新相机校准参数")
+    }
     
     fun processImage(bitmap: Bitmap): AlgorithmResult {
         return processAsparagus(bitmap)
@@ -71,6 +85,29 @@ object AlgorithmProcessor {
         try {
             Utils.bitmapToMat(workBitmap, rgba)
             
+            // --- 0. 镜头去畸变 (Phase 2) ---
+            intrinsicCalibration?.let { intrinsic ->
+                lensDistortion?.let { distortion ->
+                    val camMatrix = Mat(3, 3, CvType.CV_32F)
+                    // intrinsic: [fx, fy, cx, cy, s]
+                    camMatrix.put(0, 0, intrinsic[0].toDouble()) // fx
+                    camMatrix.put(0, 1, intrinsic[4].toDouble()) // s
+                    camMatrix.put(0, 2, intrinsic[2].toDouble()) // cx
+                    camMatrix.put(1, 1, intrinsic[1].toDouble()) // fy
+                    camMatrix.put(1, 2, intrinsic[3].toDouble()) // cy
+                    camMatrix.put(2, 2, 1.0)
+                    
+                    val distCoeffs = MatOfDouble(*DoubleArray(distortion.size) { distortion[it].toDouble() })
+                    val undistorted = Mat()
+                    Calib3d.undistort(rgba, undistorted, camMatrix, distCoeffs)
+                    undistorted.copyTo(rgba)
+                    undistorted.release()
+                    camMatrix.release()
+                    distCoeffs.release()
+                    Log.d(TAG, "已应用镜头去畸变校正")
+                }
+            }
+
             // --- 1. ArUco 检测与标定 ---
             val dictionary = Objdetect.getPredefinedDictionary(Objdetect.DICT_4X4_50)
             val detector = ArucoDetector(dictionary)
@@ -78,7 +115,7 @@ object AlgorithmProcessor {
             
             val markerCornersList = mutableListOf<Array<PointF>>()
             val markerIds = mutableListOf<Int>()
-            var pixelsPerMm = 0.0
+            var primaryPixelsPerMm = 0.0
             
             if (ids.rows() > 0) {
                 for (i in 0 until corners.size) {
@@ -100,37 +137,65 @@ object AlgorithmProcessor {
                     val avgPixelSize = (d1 + d2 + d3 + d4) / 4.0
                     
                     // ArUco 尺寸已在缩放后的坐标系下，像素/mm 系数不受影响
-                    if (pixelsPerMm == 0.0) {
-                        pixelsPerMm = avgPixelSize / ARUCO_SIZE_MM
+                    if (primaryPixelsPerMm == 0.0) {
+                        primaryPixelsPerMm = avgPixelSize / ARUCO_SIZE_MM
                     }
                 }
             }
             
-            // --- 2. 芦笋分割 (严格限制在 ArUco 标记构成的矩形区域内) ---
-            var roiRect = org.opencv.core.Rect(0, 0, rgba.cols(), rgba.rows())
-            if (markerCornersList.isNotEmpty()) {
-                var minX = rgba.cols().toFloat()
-                var minY = rgba.rows().toFloat()
-                var maxX = 0f
-                var maxY = 0f
-                for (marker in markerCornersList) {
-                    for (p in marker) {
-                        minX = minOf(minX, p.x)
-                        minY = minOf(minY, p.y)
-                        maxX = maxOf(maxX, p.x)
-                        maxY = maxOf(maxY, p.y)
-                    }
-                }
-                // 按照用户要求，以 Aruco 外角为界，不再留边距
-                val x = maxOf(0, minX.toInt())
-                val y = maxOf(0, minY.toInt())
-                val w = minOf(rgba.cols() - x, (maxX - minX).toInt())
-                val h = minOf(rgba.rows() - y, (maxY - minY).toInt())
-                roiRect = org.opencv.core.Rect(x, y, w, h)
+            // --- 2. 透视变换 / 标准化画布 (Phase 1) ---
+            // 目标：将图像归一化为 1mm = 10px 的 1000px*800px 标准空间
+            val MM_TO_PX = 10.0
+            val targetWidth = 1000
+            val targetHeight = 800
+            val warpedRgba = Mat(targetHeight, targetWidth, rgba.type())
+            var hasWarped = false
+            var currentPixelsPerMm = MM_TO_PX // 默认在 Warped 空间下 1mm = 10px
+
+            var leftMarker: Array<PointF>? = null
+            var rightMarker: Array<PointF>? = null
+
+            if (markerCornersList.size >= 2) {
+                // 找到最左和最右的两个 Marker 建立基准
+                val sortedMarkers = markerCornersList.indices.sortedBy { markerCornersList[it][0].x }
+                leftMarker = markerCornersList[sortedMarkers.first()]
+                rightMarker = markerCornersList[sortedMarkers.last()]
+
+                // 物理间距定义 (假设 Marker 中心间距为 100mm，基于您的布局可调整)
+                // 这里为了通用性，先基于 Marker 自身中心点和角度拉平
+                val srcPoints = MatOfPoint2f(
+                    org.opencv.core.Point(leftMarker[0].x.toDouble(), leftMarker[0].y.toDouble()),
+                    org.opencv.core.Point(rightMarker[1].x.toDouble(), rightMarker[1].y.toDouble()),
+                    org.opencv.core.Point(rightMarker[2].x.toDouble(), rightMarker[2].y.toDouble()),
+                    org.opencv.core.Point(leftMarker[3].x.toDouble(), leftMarker[3].y.toDouble())
+                )
+                
+                // 映射到标准坐标：左侧 Marker 左上(200, 300) 到 右侧 Marker 右下(800, 500)
+                // 这将提供约 60mm 的主测量区，分辨率 10px/mm
+                val dstPoints = MatOfPoint2f(
+                    org.opencv.core.Point(200.0, 300.0),
+                    org.opencv.core.Point(800.0, 300.0),
+                    org.opencv.core.Point(800.0, 500.0),
+                    org.opencv.core.Point(200.0, 500.0)
+                )
+
+                val transMat = Imgproc.getPerspectiveTransform(srcPoints, dstPoints)
+                Imgproc.warpPerspective(rgba, warpedRgba, transMat, warpedRgba.size())
+                hasWarped = true
+                Log.i(TAG, "已应用透视校正，进入标准化空间")
+                
+                transMat.release()
+                srcPoints.release()
+                dstPoints.release()
+            } else {
+                    // 如果 Marker 不足，回退到原始缩放逻辑 (但会存在机型偏差)
+                Log.w(TAG, "Marker 不足，回退到传统比例模式")
+                rgba.copyTo(warpedRgba)
+                currentPixelsPerMm = primaryPixelsPerMm
             }
 
-            // 裁剪 ROI 图像
-            rgbaRoi = rgba.submat(roiRect)
+            // 无论是否 Waped，后续逻辑都在 warpedRgba 上进行
+            rgbaRoi = warpedRgba 
             Imgproc.cvtColor(rgbaRoi, hsvRoi, Imgproc.COLOR_RGB2HSV)
             
             // 绿色分割掩膜 (在 ROI 内进行)
@@ -212,25 +277,25 @@ object AlgorithmProcessor {
                 var lengthMm = 0.0
                 val allDiameterLinesInRoi = mutableListOf<List<PointF>>()
                 
-                if (pixelsPerMm > 0 && rootToHeadAxis.isNotEmpty()) {
+                    if (currentPixelsPerMm > 0 && rootToHeadAxis.isNotEmpty()) {
                     // 1. 计算轴向长度
                     var totalLengthPx = 0.0
                     for (i in 0 until rootToHeadAxis.size - 1) {
                         totalLengthPx += dist(rootToHeadAxis[i], rootToHeadAxis[i+1])
                     }
-                    lengthMm = totalLengthPx / pixelsPerMm
+                    lengthMm = totalLengthPx / currentPixelsPerMm
                     
                     // 2. 多点直径采样 (5mm, 10mm, 15mm 处)
                     val samplingOffsetsMm = listOf(5.0, 10.0, 15.0)
                     val diameterSamples = mutableListOf<Double>()
                     
                     for (offsetMm in samplingOffsetsMm) {
-                        val offsetPx = offsetMm * pixelsPerMm
+                        val offsetPx = offsetMm * currentPixelsPerMm
                         val (samplePoint, normalVec) = findPointAndNormalAtDistanceStable(rootToHeadAxis, offsetPx)
                         
                         if (samplePoint != null && normalVec != null) {
                             val widthPx = measureWidthAlongNormal(currentRoiMask, samplePoint, normalVec)
-                            diameterSamples.add(widthPx / pixelsPerMm)
+                            diameterSamples.add(widthPx / currentPixelsPerMm)
                             
                             allDiameterLinesInRoi.add(listOf(
                                 PointF((samplePoint.x - normalVec.x * widthPx/2).toFloat(), (samplePoint.y - normalVec.y * widthPx/2).toFloat()),
@@ -255,15 +320,37 @@ object AlgorithmProcessor {
                     else -> "F"
                 }
                 
-                // 将所有坐标从 ROI 空间映射回全局 scaled 空间，再还原到原始分辨率
+                // 还原坐标到原始分辨率空间 (Phase 3)
                 val invScale = 1.0 / scaleFactor
-                
+                val invTransMat = if (hasWarped && leftMarker != null && rightMarker != null) {
+                    val m = Imgproc.getPerspectiveTransform(
+                        MatOfPoint2f(
+                            org.opencv.core.Point(200.0, 300.0),
+                            org.opencv.core.Point(800.0, 300.0),
+                            org.opencv.core.Point(800.0, 500.0),
+                            org.opencv.core.Point(200.0, 500.0)
+                        ),
+                        MatOfPoint2f(
+                            org.opencv.core.Point(leftMarker[0].x.toDouble(), leftMarker[0].y.toDouble()),
+                            org.opencv.core.Point(rightMarker[1].x.toDouble(), rightMarker[1].y.toDouble()),
+                            org.opencv.core.Point(rightMarker[2].x.toDouble(), rightMarker[2].y.toDouble()),
+                            org.opencv.core.Point(leftMarker[3].x.toDouble(), leftMarker[3].y.toDouble())
+                        )
+                    )
+                    m
+                } else null
+
                 fun mapToOriginal(p: PointF): PointF {
-                    return PointF(((p.x + roiRect.x) * invScale).toFloat(), ((p.y + roiRect.y) * invScale).toFloat())
-                }
-                
-                fun mapToOriginal(p: Point): Point {
-                    return Point((p.x + roiRect.x) * invScale, (p.y + roiRect.y) * invScale)
+                    if (invTransMat != null) {
+                        val src = MatOfPoint2f(org.opencv.core.Point(p.x.toDouble(), p.y.toDouble()))
+                        val dst = MatOfPoint2f()
+                        Core.perspectiveTransform(src, dst, invTransMat)
+                        val res = dst.toArray()[0]
+                        src.release(); dst.release()
+                        return PointF((res.x * invScale).toFloat(), (res.y * invScale).toFloat())
+                    }
+                    // 回退方案 (无 Warp)
+                    return PointF((p.x * invScale).toFloat(), (p.y * invScale).toFloat())
                 }
 
                 val finalContour = maxContour.toArray().map { p -> mapToOriginal(PointF(p.x.toFloat(), p.y.toFloat())) }
@@ -271,19 +358,20 @@ object AlgorithmProcessor {
                 val finalAxisPath = rootToHeadAxis.map { pt -> mapToOriginal(pt) }
                 val finalDiameterLines = allDiameterLinesInRoi.map { line -> line.map { pt -> mapToOriginal(pt) } }
 
-                return AlgorithmResult(
+                val result = AlgorithmResult(
                     success = true,
                     grade = grade,
                     diameter = correctedDiameterMm,
                     rawDiameter = rawDiameterMm,
                     length = lengthMm,
                     purpleRootPosition = if (finalTailPoint != null) "(${finalTailPoint.x.toInt()}, ${finalTailPoint.y.toInt()})" else "未检测到",
-                    asparagusRect = android.graphics.Rect(
-                        ((rectInRoi.x + roiRect.x) * invScale).toInt(), 
-                        ((rectInRoi.y + roiRect.y) * invScale).toInt(),
-                        ((rectInRoi.x + rectInRoi.width + roiRect.x) * invScale).toInt(), 
-                        ((rectInRoi.y + rectInRoi.height + roiRect.y) * invScale).toInt()
-                    ),
+                    asparagusRect = if (finalContour.isNotEmpty()) {
+                        val left = finalContour.minOf { it.x }.toInt()
+                        val top = finalContour.minOf { it.y }.toInt()
+                        val right = finalContour.maxOf { it.x }.toInt()
+                        val bottom = finalContour.maxOf { it.y }.toInt()
+                        android.graphics.Rect(left, top, right, bottom)
+                    } else null,
                     asparagusContour = finalContour,
                     tailPoint = finalTailPoint,
                     axisPath = finalAxisPath,
@@ -295,6 +383,8 @@ object AlgorithmProcessor {
                     },
                     arucoIds = markerIds
                 )
+                invTransMat?.release()
+                return result
             } else {
                 return AlgorithmResult(false, error = "未检测到芦笋", arucoCorners = markerCornersList, arucoIds = markerIds)
             }

@@ -31,25 +31,28 @@ class CameraManager(private val context: Context, private val textureView: Textu
     }
     
     fun startCamera() {
-        Log.i("CameraManager", "启动相机流程...")
+        Log.i("CameraManager", "启动相机监听器...")
         textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
             override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-                Log.d("DiagCamera", "onSurfaceTextureAvailable: 尺寸=${width}x${height}, Surface=$surface")
+                Log.d("DiagCamera", "onSurfaceTextureAvailable: 尺寸=${width}x${height}")
                 surfaceTexture = surface
                 openCamera(width, height)
             }
             override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
-                Log.d("DiagCamera", "onSurfaceTextureSizeChanged: 尺寸=${width}x${height}")
                 configureTransform(width, height)
             }
-            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-                // 每帧更新太频繁，暂时不打日志
-            }
+            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
             override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
                 Log.d("DiagCamera", "onSurfaceTextureDestroyed")
                 release()
                 return true
             }
+        }
+        
+        // 如果 Surface 已经可用（例如从后台返回），直接尝试打开
+        if (textureView.isAvailable) {
+            surfaceTexture = textureView.surfaceTexture
+            openCamera(textureView.width, textureView.height)
         }
     }
     
@@ -63,12 +66,28 @@ class CameraManager(private val context: Context, private val textureView: Textu
     fun getSensorOrientation(): Int = sensorOrientation
 
     private fun openCamera(width: Int, height: Int) {
+        if (cameraDevice != null) {
+            Log.d("CameraManager", "相机已在运行中，跳过打开")
+            return
+        }
         val manager = context.getSystemService(Context.CAMERA_SERVICE) as AndroidCameraManager
         try {
             val cameraId = manager.cameraIdList[0]
             val characteristics = manager.getCameraCharacteristics(cameraId)
             val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP) as StreamConfigurationMap
             sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
+            
+            // 提取畸变参数和内参 (Phase 2)
+            try {
+                val distortion = characteristics.get(CameraCharacteristics.LENS_DISTORTION)
+                val intrinsic = characteristics.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
+                if (distortion != null && intrinsic != null) {
+                    Log.i("CameraManager", "读取到畸变参数: ${distortion.joinToString()}")
+                    com.example.asparagusclassifier.algorithm.AlgorithmProcessor.setCalibrationData(intrinsic, distortion)
+                }
+            } catch (e: Exception) {
+                Log.w("CameraManager", "无法读取畸变参数: ${e.message}")
+            }
             
             val outputSizes = map.getOutputSizes(SurfaceTexture::class.java)
             val bestSize = chooseOptimalSize(outputSizes, width, height)

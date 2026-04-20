@@ -66,7 +66,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         super.onCreate(savedInstanceState)
         
         supportActionBar?.let { actionBar ->
-            val titleText = "冯氏芦笋工具 (2026年4月)"
+            val titleText = "冯氏芦笋工具 (2026年3月)"
             val spannableTitle = SpannableString(titleText)
             val startIdx = titleText.indexOf("(")
             if (startIdx >= 0) {
@@ -112,7 +112,19 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             }
         }
         
+        // 权限检查和启动逻辑已移至 onResume
+    }
+
+    override fun onResume() {
+        super.onResume()
+        Log.i(TAG, "Activity Resumed, 尝试恢复相机")
         checkCameraPermission()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        Log.i(TAG, "Activity Stopped, 释放相机资源")
+        cameraManager.release()
     }
     
     private fun checkCameraPermission() {
@@ -269,7 +281,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             R.id.action_about -> {
                 android.app.AlertDialog.Builder(this)
                     .setTitle("冯氏芦笋工具")
-                    .setMessage("山东卷积分公司\n2026年4月")
+                    .setMessage("山东卷积分公司\n2026年3月")
                     .setNeutralButton("下载校准图纸") { _, _ ->
                         val intent = android.content.Intent(
                             android.content.Intent.ACTION_VIEW,
