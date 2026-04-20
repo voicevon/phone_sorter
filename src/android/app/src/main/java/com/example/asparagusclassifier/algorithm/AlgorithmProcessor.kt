@@ -31,8 +31,26 @@ data class AlgorithmResult(
 
 object AlgorithmProcessor {
     private const val TAG = "AsparagusClassifier"
-    // 假设 ArUco 标记的物理尺寸为 25mm
-    private const val ARUCO_SIZE_MM = 25.0 
+    // ArUco 标记配置 (基于 aruco_final_10_13_40_42.pdf)
+    private const val ID_TL = 10
+    private const val ID_TR = 13
+    private const val ID_BR = 40
+    private const val ID_BL = 42
+
+    // 物理尺寸基准 (单位: mm)
+    private const val BOARD_WIDTH_MM = 167.0
+    private const val BOARD_HEIGHT_MM = 250.0
+    private const val MM_TO_PX = 10.0 // 标准化分辨率: 10px/mm
+
+    // 标准化画布尺寸
+    private const val TARGET_WIDTH = 2000
+    private const val TARGET_HEIGHT = 3000
+
+    // 标准化坐标 (中心点)
+    private val TARGET_TL = org.opencv.core.Point(150.0, 250.0)
+    private val TARGET_TR = org.opencv.core.Point(150.0 + BOARD_WIDTH_MM * MM_TO_PX, 250.0)
+    private val TARGET_BR = org.opencv.core.Point(150.0 + BOARD_WIDTH_MM * MM_TO_PX, 250.0 + BOARD_HEIGHT_MM * MM_TO_PX)
+    private val TARGET_BL = org.opencv.core.Point(150.0, 250.0 + BOARD_HEIGHT_MM * MM_TO_PX)
 
     // 相机校准数据 (Phase 2)
     private var intrinsicCalibration: FloatArray? = null
@@ -54,8 +72,8 @@ object AlgorithmProcessor {
     private fun processAsparagus(bitmap: Bitmap): AlgorithmResult {
         Log.i(TAG, "开始执行算法: 芦笋曲线测量版")
 
-        // --- 尾列缩放：长边超过 800px 就按比例缩小，大幅降低计算负荷---
-        val MAX_SIDE = 800
+        // --- 提高诊断分辨率：从 800px 提至 1280px ---
+        val MAX_SIDE = 1600 // 增加分辨率以提高检测成功率
         val origW = bitmap.width
         val origH = bitmap.height
         val scaleFactor = if (maxOf(origW, origH) > MAX_SIDE) {
@@ -85,16 +103,17 @@ object AlgorithmProcessor {
         try {
             Utils.bitmapToMat(workBitmap, rgba)
             
-            // --- 0. 镜头去畸变 (Phase 2) ---
-            intrinsicCalibration?.let { intrinsic ->
-                lensDistortion?.let { distortion ->
+            // --- 0. 镜头去畸变 (已暂时禁用以排查 ArUco 识别问题) ---
+            Log.e(TAG, "去畸变跳过 (调试模式)")
+            /*
+            intrinsicCalibration?.let { intrinsic: FloatArray ->
+                lensDistortion?.let { distortion: FloatArray ->
                     val camMatrix = Mat(3, 3, CvType.CV_32F)
-                    // intrinsic: [fx, fy, cx, cy, s]
-                    camMatrix.put(0, 0, intrinsic[0].toDouble()) // fx
-                    camMatrix.put(0, 1, intrinsic[4].toDouble()) // s
-                    camMatrix.put(0, 2, intrinsic[2].toDouble()) // cx
-                    camMatrix.put(1, 1, intrinsic[1].toDouble()) // fy
-                    camMatrix.put(1, 2, intrinsic[3].toDouble()) // cy
+                    camMatrix.put(0, 0, intrinsic[0].toDouble())
+                    camMatrix.put(0, 1, intrinsic[4].toDouble())
+                    camMatrix.put(0, 2, intrinsic[2].toDouble())
+                    camMatrix.put(1, 1, intrinsic[1].toDouble())
+                    camMatrix.put(1, 2, intrinsic[3].toDouble())
                     camMatrix.put(2, 2, 1.0)
                     
                     val distCoeffs = MatOfDouble(*DoubleArray(distortion.size) { distortion[it].toDouble() })
@@ -104,95 +123,164 @@ object AlgorithmProcessor {
                     undistorted.release()
                     camMatrix.release()
                     distCoeffs.release()
-                    Log.d(TAG, "已应用镜头去畸变校正")
+                    Log.e(TAG, "已应用镜头去畸变校正")
                 }
-            }
+            } ?: Log.e(TAG, "相机校准参数为空，跳过去畸变")
+            */
 
-            // --- 1. ArUco 检测与标定 ---
+            // --- 1. ArUco 检测与验证 (优化：尝试多种参数与多阶段检测) ---
+            val gray = Mat()
+            Imgproc.cvtColor(rgba, gray, Imgproc.COLOR_RGBA2GRAY)
+            
             val dictionary = Objdetect.getPredefinedDictionary(Objdetect.DICT_4X4_50)
-            val detector = ArucoDetector(dictionary)
-            detector.detectMarkers(rgba, corners, ids, rejected)
+            val arucoParams = DetectorParameters()
             
-            val markerCornersList = mutableListOf<Array<PointF>>()
-            val markerIds = mutableListOf<Int>()
-            var primaryPixelsPerMm = 0.0
+            // 鲁棒性精调
+            arucoParams.set_adaptiveThreshWinSizeMin(3)
+            arucoParams.set_adaptiveThreshWinSizeMax(23) // 恢复默认，避免窗口过大导致的边缘模糊
+            arucoParams.set_adaptiveThreshWinSizeStep(10)
+            arucoParams.set_minMarkerPerimeterRate(0.01) // 降低阈值以支持更小的/更远的标记
             
-            if (ids.rows() > 0) {
-                for (i in 0 until corners.size) {
-                    val cornerMat = corners[i]
-                    val id = ids.get(i, 0)[0].toInt()
-                    markerIds.add(id)
-                    
-                    val p0 = PointF(cornerMat.get(0, 0)[0].toFloat(), cornerMat.get(0, 0)[1].toFloat())
-                    val p1 = PointF(cornerMat.get(0, 1)[0].toFloat(), cornerMat.get(0, 1)[1].toFloat())
-                    val p2 = PointF(cornerMat.get(0, 2)[0].toFloat(), cornerMat.get(0, 2)[1].toFloat())
-                    val p3 = PointF(cornerMat.get(0, 3)[0].toFloat(), cornerMat.get(0, 3)[1].toFloat())
-                    
-                    markerCornersList.add(arrayOf(p0, p1, p2, p3))
-                    
-                    val d1 = dist(p0, p1)
-                    val d2 = dist(p1, p2)
-                    val d3 = dist(p2, p3)
-                    val d4 = dist(p3, p0)
-                    val avgPixelSize = (d1 + d2 + d3 + d4) / 4.0
-                    
-                    // ArUco 尺寸已在缩放后的坐标系下，像素/mm 系数不受影响
-                    if (primaryPixelsPerMm == 0.0) {
-                        primaryPixelsPerMm = avgPixelSize / ARUCO_SIZE_MM
+            val detector = ArucoDetector(dictionary, arucoParams)
+            detector.detectMarkers(gray, corners, ids, rejected)
+            
+            Log.e(TAG, "ArUco 检测详情 (阶段1): 尺寸=${gray.cols()}x${gray.rows()}, 已检测ID数=${ids.rows()}, 被拒绝数量=${rejected.size}")
+            
+            // 如果阶段1识别出的 ID 数量小于4，且有校准数据，尝试去畸变后再测
+            if (ids.rows() < 4) {
+                intrinsicCalibration?.let { intrinsic ->
+                    lensDistortion?.let { distortion ->
+                        Log.i(TAG, "阶段1检测不足，尝试应用去畸变后再检测...")
+                        val camMatrix = Mat(3, 3, CvType.CV_32F)
+                        camMatrix.put(0, 0, intrinsic[0].toDouble())
+                        camMatrix.put(0, 1, intrinsic[4].toDouble())
+                        camMatrix.put(0, 2, intrinsic[2].toDouble())
+                        camMatrix.put(1, 1, intrinsic[1].toDouble())
+                        camMatrix.put(1, 2, intrinsic[3].toDouble())
+                        camMatrix.put(2, 2, 1.0)
+                        val distCoeffs = MatOfDouble(*DoubleArray(distortion.size) { distortion[it].toDouble() })
+                        
+                        val undistortedRaw = Mat()
+                        Calib3d.undistort(rgba, undistortedRaw, camMatrix, distCoeffs)
+                        
+                        val grayUndist = Mat()
+                        Imgproc.cvtColor(undistortedRaw, grayUndist, Imgproc.COLOR_RGBA2GRAY)
+                        detector.detectMarkers(grayUndist, corners, ids, rejected)
+                        Log.e(TAG, "ArUco 检测详情 (阶段2 - 去畸变后): 已检测ID数=${ids.rows()}")
+                        
+                        // 使用去畸变后的图覆盖原始图以进行后续分析
+                        undistortedRaw.copyTo(rgba)
+                        
+                        undistortedRaw.release()
+                        grayUndist.release()
+                        camMatrix.release()
+                        distCoeffs.release()
+                    }
+                }
+            } else {
+                // 如果原始图已经检测成功，为了后续测量精度，仍然应用去畸变
+                intrinsicCalibration?.let { intrinsic ->
+                    lensDistortion?.let { distortion ->
+                        val camMatrix = Mat(3, 3, CvType.CV_32F)
+                        camMatrix.put(0, 0, intrinsic[0].toDouble())
+                        camMatrix.put(0, 1, intrinsic[4].toDouble())
+                        camMatrix.put(0, 2, intrinsic[2].toDouble())
+                        camMatrix.put(1, 1, intrinsic[1].toDouble())
+                        camMatrix.put(1, 2, intrinsic[3].toDouble())
+                        camMatrix.put(2, 2, 1.0)
+                        val distCoeffs = MatOfDouble(*DoubleArray(distortion.size) { distortion[it].toDouble() })
+                        val undistortedRaw = Mat()
+                        Calib3d.undistort(rgba, undistortedRaw, camMatrix, distCoeffs)
+                        undistortedRaw.copyTo(rgba)
+                        undistortedRaw.release()
+                        camMatrix.release()
+                        distCoeffs.release()
+                        Log.i(TAG, "检测完成后应用镜头去畸变")
                     }
                 }
             }
+            gray.release()
             
-            // --- 2. 透视变换 / 标准化画布 (Phase 1) ---
-            // 目标：将图像归一化为 1mm = 10px 的 1000px*800px 标准空间
-            val MM_TO_PX = 10.0
-            val targetWidth = 1000
-            val targetHeight = 800
-            val warpedRgba = Mat(targetHeight, targetWidth, rgba.type())
-            var hasWarped = false
-            var currentPixelsPerMm = MM_TO_PX // 默认在 Warped 空间下 1mm = 10px
-
-            var leftMarker: Array<PointF>? = null
-            var rightMarker: Array<PointF>? = null
-
-            if (markerCornersList.size >= 2) {
-                // 找到最左和最右的两个 Marker 建立基准
-                val sortedMarkers = markerCornersList.indices.sortedBy { markerCornersList[it][0].x }
-                leftMarker = markerCornersList[sortedMarkers.first()]
-                rightMarker = markerCornersList[sortedMarkers.last()]
-
-                // 物理间距定义 (假设 Marker 中心间距为 100mm，基于您的布局可调整)
-                // 这里为了通用性，先基于 Marker 自身中心点和角度拉平
-                val srcPoints = MatOfPoint2f(
-                    org.opencv.core.Point(leftMarker[0].x.toDouble(), leftMarker[0].y.toDouble()),
-                    org.opencv.core.Point(rightMarker[1].x.toDouble(), rightMarker[1].y.toDouble()),
-                    org.opencv.core.Point(rightMarker[2].x.toDouble(), rightMarker[2].y.toDouble()),
-                    org.opencv.core.Point(leftMarker[3].x.toDouble(), leftMarker[3].y.toDouble())
-                )
-                
-                // 映射到标准坐标：左侧 Marker 左上(200, 300) 到 右侧 Marker 右下(800, 500)
-                // 这将提供约 60mm 的主测量区，分辨率 10px/mm
-                val dstPoints = MatOfPoint2f(
-                    org.opencv.core.Point(200.0, 300.0),
-                    org.opencv.core.Point(800.0, 300.0),
-                    org.opencv.core.Point(800.0, 500.0),
-                    org.opencv.core.Point(200.0, 500.0)
-                )
-
-                val transMat = Imgproc.getPerspectiveTransform(srcPoints, dstPoints)
-                Imgproc.warpPerspective(rgba, warpedRgba, transMat, warpedRgba.size())
-                hasWarped = true
-                Log.i(TAG, "已应用透视校正，进入标准化空间")
-                
-                transMat.release()
-                srcPoints.release()
-                dstPoints.release()
-            } else {
-                    // 如果 Marker 不足，回退到原始缩放逻辑 (但会存在机型偏差)
-                Log.w(TAG, "Marker 不足，回退到传统比例模式")
-                rgba.copyTo(warpedRgba)
-                currentPixelsPerMm = primaryPixelsPerMm
+            val detectedMarkers = mutableMapOf<Int, Array<PointF>>()
+            val markerCornersList = mutableListOf<Array<PointF>>()
+            val markerIds = mutableListOf<Int>()
+            
+            if (ids.rows() > 0) {
+                val allIds = mutableListOf<Int>()
+                for (i in 0 until corners.size) {
+                    val cornerMat = corners[i]
+                    val id = ids.get(i, 0)[0].toInt()
+                    allIds.add(id)
+                    
+                    // 将坐标从缩放后的工作空间映射回原始 Bitmap 坐标空间
+                    val invScale = (1.0 / scaleFactor).toFloat()
+                    val p0 = PointF(cornerMat.get(0, 0)[0].toFloat() * invScale, cornerMat.get(0, 0)[1].toFloat() * invScale)
+                    val p1 = PointF(cornerMat.get(0, 1)[0].toFloat() * invScale, cornerMat.get(0, 1)[1].toFloat() * invScale)
+                    val p2 = PointF(cornerMat.get(0, 2)[0].toFloat() * invScale, cornerMat.get(0, 2)[1].toFloat() * invScale)
+                    val p3 = PointF(cornerMat.get(0, 3)[0].toFloat() * invScale, cornerMat.get(0, 3)[1].toFloat() * invScale)
+                    
+                    val cornersArray = arrayOf(p0, p1, p2, p3)
+                    detectedMarkers[id] = cornersArray
+                    markerCornersList.add(cornersArray)
+                    markerIds.add(id)
+                }
+                Log.e(TAG, "检出的所有 ID: $allIds")
             }
+            // gray 已在上方 line 202 释放
+            
+            // 验证是否集齐 4 个指定标记
+            val requiredIds = listOf(ID_TL, ID_TR, ID_BR, ID_BL)
+            val missingIds = requiredIds.filter { !detectedMarkers.containsKey(it) }
+            
+            if (missingIds.isNotEmpty()) {
+                Log.w(TAG, "标记不足或 ID 错误，缺失: $missingIds")
+                return AlgorithmResult(false, error = "检测到标定板不完整，请确保 ID 10, 13, 40, 42 全部可见", arucoCorners = markerCornersList, arucoIds = markerIds)
+            }
+            
+            // --- 2. 标定板合法性校验 (Proportionality Test) ---
+            val pTL = centerOf(detectedMarkers[ID_TL]!!)
+            val pTR = centerOf(detectedMarkers[ID_TR]!!)
+            val pBR = centerOf(detectedMarkers[ID_BR]!!)
+            val pBL = centerOf(detectedMarkers[ID_BL]!!)
+            
+            val actualW = dist(pTL, pTR)
+            val actualH = dist(pTL, pBL)
+            val expectedRatio = BOARD_WIDTH_MM / BOARD_HEIGHT_MM
+            val actualRatio = actualW / actualH
+            val ratioError = abs(actualRatio - expectedRatio) / expectedRatio
+            
+            Log.i(TAG, "标定板比例校验: 预期=$expectedRatio, 实际=$actualRatio, 误差=${"%.1f%%".format(ratioError * 100)}")
+            
+            if (ratioError > 0.15) { // 允许 15% 的透视变形误差 (宽容处理，靠 Homography 修正)
+                Log.e(TAG, "标定板比例严重失真")
+                return AlgorithmResult(false, error = "非法标定板：比例严重失真", arucoCorners = markerCornersList, arucoIds = markerIds)
+            }
+            
+            // --- 3. 透视变换 / 标准化画布 ---
+            val warpedRgba = Mat(TARGET_HEIGHT, TARGET_WIDTH, rgba.type())
+            var currentPixelsPerMm = MM_TO_PX 
+
+            val srcPoints = MatOfPoint2f(
+                org.opencv.core.Point(pTL.x.toDouble(), pTL.y.toDouble()),
+                org.opencv.core.Point(pTR.x.toDouble(), pTR.y.toDouble()),
+                org.opencv.core.Point(pBR.x.toDouble(), pBR.y.toDouble()),
+                org.opencv.core.Point(pBL.x.toDouble(), pBL.y.toDouble())
+            )
+            
+            val dstPoints = MatOfPoint2f(
+                TARGET_TL,
+                TARGET_TR,
+                TARGET_BR,
+                TARGET_BL
+            )
+
+            val transMat = Imgproc.getPerspectiveTransform(srcPoints, dstPoints)
+            Imgproc.warpPerspective(rgba, warpedRgba, transMat, warpedRgba.size())
+            Log.i(TAG, "已应用四点透视校正，进入标准化空间")
+            
+            transMat.release()
+            srcPoints.release()
+            dstPoints.release()
 
             // 无论是否 Waped，后续逻辑都在 warpedRgba 上进行
             rgbaRoi = warpedRgba 
@@ -322,23 +410,23 @@ object AlgorithmProcessor {
                 
                 // 还原坐标到原始分辨率空间 (Phase 3)
                 val invScale = 1.0 / scaleFactor
-                val invTransMat = if (hasWarped && leftMarker != null && rightMarker != null) {
+                val invTransMat = run {
                     val m = Imgproc.getPerspectiveTransform(
                         MatOfPoint2f(
-                            org.opencv.core.Point(200.0, 300.0),
-                            org.opencv.core.Point(800.0, 300.0),
-                            org.opencv.core.Point(800.0, 500.0),
-                            org.opencv.core.Point(200.0, 500.0)
+                            TARGET_TL,
+                            TARGET_TR,
+                            TARGET_BR,
+                            TARGET_BL
                         ),
                         MatOfPoint2f(
-                            org.opencv.core.Point(leftMarker[0].x.toDouble(), leftMarker[0].y.toDouble()),
-                            org.opencv.core.Point(rightMarker[1].x.toDouble(), rightMarker[1].y.toDouble()),
-                            org.opencv.core.Point(rightMarker[2].x.toDouble(), rightMarker[2].y.toDouble()),
-                            org.opencv.core.Point(leftMarker[3].x.toDouble(), leftMarker[3].y.toDouble())
+                            org.opencv.core.Point(pTL.x.toDouble(), pTL.y.toDouble()),
+                            org.opencv.core.Point(pTR.x.toDouble(), pTR.y.toDouble()),
+                            org.opencv.core.Point(pBR.x.toDouble(), pBR.y.toDouble()),
+                            org.opencv.core.Point(pBL.x.toDouble(), pBL.y.toDouble())
                         )
                     )
                     m
-                } else null
+                }
 
                 fun mapToOriginal(p: PointF): PointF {
                     if (invTransMat != null) {
@@ -574,4 +662,10 @@ object AlgorithmProcessor {
 
     private fun dist(p1: Point, p2: Point) = sqrt((p1.x-p2.x)*(p1.x-p2.x)+(p1.y-p2.y)*(p1.y-p2.y))
     private fun dist(p1: PointF, p2: PointF) = sqrt((p1.x-p2.x).toDouble()*(p1.x-p2.x)+(p1.y-p2.y)*(p1.y-p2.y))
+
+    private fun centerOf(corners: Array<PointF>): PointF {
+        var x = 0f; var y = 0f
+        for (p in corners) { x += p.x; y += p.y }
+        return PointF(x / 4f, y / 4f)
+    }
 }

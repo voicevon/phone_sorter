@@ -66,7 +66,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         super.onCreate(savedInstanceState)
         
         supportActionBar?.let { actionBar ->
-            val titleText = "冯氏芦笋工具 (2026年3月)"
+            val titleText = "冯氏芦笋工具 (2026年2月)"
             val spannableTitle = SpannableString(titleText)
             val startIdx = titleText.indexOf("(")
             if (startIdx >= 0) {
@@ -145,13 +145,20 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         }
     }
     
-    override fun onSizeInfoReceived(cameraWidth: Int, cameraHeight: Int, cameraRatio: Float, 
+    override fun onSizeInfoReceived(cameraWidth: Int, cameraHeight: Int, cameraRatio: Float,
                                    previewWidth: Int, previewHeight: Int, previewRatio: Float) {
         // UI 更新必须在主线程
         runOnUiThread {
             val text = "直径: 0.0 mm\n长度: 0.0 mm"
             tvResult.text = text
             tvResult.visibility = View.VISIBLE
+            // Compute the actual preview rectangle relative to the OverlayView
+            // Since they are constrained together, the offset is 0,0
+            overlayView.setDisplayRect(0f, 0f, textureView.width.toFloat(), textureView.height.toFloat())
+            // Also pass sensor orientation for proper rotation handling
+            val sensorRot = cameraManager.getSensorOrientation()
+            // Store for later use when setting markers
+            // (we'll use this value in captureAndProcess)
         }
     }
 
@@ -189,18 +196,35 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             val elapsed = System.currentTimeMillis() - t0
             Log.i("MainActivity", "算法耗时: ${elapsed}ms")
 
-            // 3. 更新 UI 必须切回主线程
+            // 3. 保存调试图片 (无论成功失败都保存，用于分析)
+            saveDebugBitmap(correctedBitmap, "aruco_debug")
+
+            // 4. 更新 UI 必须切回主线程
             runOnUiThread {
                 lastBitmap = correctedBitmap
                 lastSensorRotation = 0 // 已在位图级对齐，无需矩阵再次旋转
                 if (!result.success) {
-                    Log.w("MainActivity", "识别失败，不再保存调试图片")
+                    Log.e("MainActivity", "识别失败: ${result.error}")
                 }
                 displayResult(result)
                 // 处理完成后恢复按鈕
                 btnCapture.isEnabled = true
                 btnCapture.text = "开始分析"
             }
+        }
+    }
+    
+    private fun saveDebugBitmap(bitmap: Bitmap, prefix: String) {
+        try {
+            val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+            val fileName = "${prefix}_${timeStamp}.jpg"
+            val file = java.io.File(getExternalFilesDir(null), fileName)
+            java.io.FileOutputStream(file).use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
+            }
+            Log.e(TAG, "已保存分析图像至: ${file.absolutePath}")
+        } catch (e: Exception) {
+            Log.e(TAG, "保存调试图像失败: ${e.message}")
         }
     }
 
@@ -281,7 +305,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             R.id.action_about -> {
                 android.app.AlertDialog.Builder(this)
                     .setTitle("冯氏芦笋工具")
-                    .setMessage("山东卷积分公司\n2026年3月")
+                    .setMessage("山东卷积分公司\n2026年2月")
                     .setNeutralButton("下载校准图纸") { _, _ ->
                         val intent = android.content.Intent(
                             android.content.Intent.ACTION_VIEW,

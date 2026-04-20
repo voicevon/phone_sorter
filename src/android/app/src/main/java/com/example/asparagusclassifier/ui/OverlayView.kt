@@ -153,11 +153,10 @@ class OverlayView @JvmOverloads constructor(
             val viewRect = RectF(0f, 0f, width.toFloat(), height.toFloat())
 
             coordinateMatrix.reset()
-            // 简单对齐：将 Bitmap 缩放居中映射到 OverlayView
-            // 假设输入的 Bitmap 已经由 TextureView.getBitmap() 处理好方向
+            // 等比缩放 + 居中：与 TextureView 渲染相机画面的方式一致
             coordinateMatrix.setRectToRect(bitmapRect, viewRect, Matrix.ScaleToFit.CENTER)
 
-            Log.d("OverlayView", "Matrix update: View=${width}x${height}, Bitmap=${bitmapWidth}x${bitmapHeight}")
+            Log.d("OverlayView", "Matrix updated (CENTER): View=${width}x${height}, Bitmap=${bitmapWidth}x${bitmapHeight}")
         }
     }
     
