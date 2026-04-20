@@ -21,18 +21,37 @@ object AlgorithmProcessor {
     // 相机校准数据
     private var intrinsicCalibration: FloatArray? = null
     private var lensDistortion: FloatArray? = null
+    private var sensorReferenceWidth: Int = 0
+    private var sensorReferenceHeight: Int = 0
+    
+    // 兼容性标志位
+    var isCalibrationValid: Boolean = true
+        private set
 
     // 子组件
     private val arucoEngine = ArucoEngine()
 
-    fun setCalibrationData(intrinsic: FloatArray, distortion: FloatArray) {
+    fun setCalibrationData(intrinsic: FloatArray, distortion: FloatArray, sensorWidth: Int, sensorHeight: Int) {
         this.intrinsicCalibration = intrinsic
         this.lensDistortion = distortion
-        Log.i(TAG, "已更新相机校准参数")
+        this.sensorReferenceWidth = sensorWidth
+        this.sensorReferenceHeight = sensorHeight
+        
+        // 校验内参合法性：如果焦距 (fx, fy) 均为 0，则视为无效
+        if (intrinsic.size >= 2 && intrinsic[0] == 0f && intrinsic[1] == 0f) {
+            isCalibrationValid = false
+            Log.e(TAG, "检测到无效的相机内参 (焦距为0)！将进入原始兼容模式。")
+            // 立即后台上报异常机型
+            com.example.asparagusclassifier.util.MqttReporter.reportInvalidIntrinsic(intrinsic, sensorWidth, sensorHeight)
+        } else {
+            isCalibrationValid = true
+            Log.i(TAG, "已更新相机校准参数及参考分辨率: ${sensorWidth}x${sensorHeight}")
+        }
     }
     
-    fun processImage(bitmap: Bitmap): AlgorithmResult {
-        Log.i(TAG, "开始执行算法管道 (三画布架构)")
+    fun processImage(bitmap: Bitmap, viewMode: Int = 3): AlgorithmResult {
+        val startTime = System.currentTimeMillis()
+        Log.i(TAG, ">>> 开始执行算法管道 (三画布架构) <<<")
         
         val origW = bitmap.width
         val origH = bitmap.height
@@ -40,23 +59,34 @@ object AlgorithmProcessor {
             AlgorithmConfig.SCAN_MAX_SIDE.toDouble() / maxOf(origW, origH).toDouble()
         } else 1.0
 
+        val workW = (origW * scaleFactor).toInt()
+        val workH = (origH * scaleFactor).toInt()
+        Log.i(TAG, "图像尺寸: ${origW}x${origH} -> 缩放后: ${workW}x${workH} (scale=%.3f)".format(scaleFactor))
+
         val workBitmap = if (scaleFactor < 1.0) {
-            Bitmap.createScaledBitmap(bitmap, (origW * scaleFactor).toInt(), (origH * scaleFactor).toInt(), true)
+            Bitmap.createScaledBitmap(bitmap, workW, workH, true)
         } else bitmap
 
         val rgba = Mat()
         val rgbaUndistorted = Mat()
         val warpedRgba = Mat(AlgorithmConfig.TARGET_HEIGHT, AlgorithmConfig.TARGET_WIDTH, CvType.CV_8UC4)
+        var transMat: Mat? = null
         var mapper: CoordinateMapper? = null
 
         try {
             Utils.bitmapToMat(workBitmap, rgba)
             
             // --- Step 1: 物理去畸变 (生成 Canvas 2) ---
-            if (intrinsicCalibration != null && lensDistortion != null) {
-                undistortImage(rgba, rgbaUndistorted, intrinsicCalibration!!, lensDistortion!!)
+            if (isCalibrationValid && intrinsicCalibration != null && lensDistortion != null && sensorReferenceWidth > 0) {
+                undistortImage(rgba, rgbaUndistorted, intrinsicCalibration!!, lensDistortion!!, workBitmap.width, workBitmap.height)
+                Log.i(TAG, "[Step 1] 去畸变完成")
             } else {
                 rgba.copyTo(rgbaUndistorted)
+                if (!isCalibrationValid) {
+                    Log.w(TAG, "[Step 1] 机型不兼容，已跳过去畸变 (原始模式)")
+                } else {
+                    Log.w(TAG, "[Step 1] 跳过去畸变 (校准参数缺失)")
+                }
             }
             
             // --- Step 2: 在物理画布上检测 ArUco (Canvas 2 基准) ---
@@ -66,14 +96,20 @@ object AlgorithmProcessor {
             val arucoIds = arucoResult.markerMap.keys.toList()
 
             if (!arucoResult.success) {
-                // 即使失败，也可返回去畸变后的图供调试显示
+                Log.e(TAG, "[Step 2] ArUco 检测失败: ${arucoResult.error}")
+                val duration = System.currentTimeMillis() - startTime
                 return AlgorithmResult(false, 
                     error = arucoResult.error, 
+                    executionTimeMs = duration,
                     arucoCorners = arucoCorners, 
                     arucoIds = arucoIds,
-                    processedBitmap = matToBitmap(rgbaUndistorted)
+                    canvas1Bitmap = workBitmap,
+                    canvas2Bitmap = matToBitmap(rgbaUndistorted),
+                    processedBitmap = if (viewMode == 2) matToBitmap(rgbaUndistorted) else workBitmap,
+                    viewMode = viewMode
                 )
             }
+            Log.i(TAG, "[Step 2] ArUco 检测成功")
 
             // --- Step 3: 透视变换 (Canvas 2 -> Canvas 3) ---
             val pTL = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_TL]!!)
@@ -94,39 +130,65 @@ object AlgorithmProcessor {
                 AlgorithmConfig.TARGET_BL
             )
 
-            val transMat = Imgproc.getPerspectiveTransform(srcPoints, dstPoints)
-            Imgproc.warpPerspective(rgbaUndistorted, warpedRgba, transMat, warpedRgba.size())
+            transMat = Imgproc.getPerspectiveTransform(srcPoints, dstPoints)
+            Imgproc.warpPerspective(rgbaUndistorted, warpedRgba, transMat!!, warpedRgba.size())
             
-            // 初始化坐标映射器
             mapper = CoordinateMapper(scaleFactor, transMat)
+            Log.i(TAG, "[Step 3] 透视变换完成 (Warping)")
             
             srcPoints.release()
             dstPoints.release()
-            transMat.release()
+            // transMat 将在业务逻辑结束后由 finally 块释放
 
             // --- Step 4: 逻辑画布分析 (Canvas 3 基准) ---
             val visionResult = AsparagusVisionCore.analyze(warpedRgba, AlgorithmConfig.MM_TO_PX)
             
             if (!visionResult.success) {
+                Log.e(TAG, "[Step 4] 芦笋视觉分析失败: ${visionResult.error}")
+                val duration = System.currentTimeMillis() - startTime
                 return AlgorithmResult(false, 
                     error = visionResult.error, 
+                    executionTimeMs = duration,
                     arucoCorners = arucoCorners, 
                     arucoIds = arucoIds,
-                    processedBitmap = matToBitmap(rgbaUndistorted)
+                    canvas1Bitmap = workBitmap,
+                    canvas2Bitmap = matToBitmap(rgbaUndistorted),
+                    canvas3Bitmap = matToBitmap(warpedRgba),
+                    processedBitmap = matToBitmap(warpedRgba),
+                    viewMode = viewMode
                 )
             }
+            Log.i(TAG, "[Step 4] 芦笋视觉分析成功: 直径=%.1fmm, 长度=%.1fmm".format(visionResult.diameterMm, visionResult.lengthMm))
+            
+            // --- Step 4.5: 坐标同步 (针对 C3 模式映射 ArUco 标记点) ---
+            val finalArucoCorners = if (viewMode == 3 && transMat != null) {
+                arucoCorners.map { corners ->
+                    val srcMat = MatOfPoint2f(*corners.map { org.opencv.core.Point(it.x.toDouble(), it.y.toDouble()) }.toTypedArray())
+                    val dstMat = MatOfPoint2f()
+                    Core.perspectiveTransform(srcMat, dstMat, transMat)
+                    val transformed = dstMat.toArray().map { android.graphics.PointF(it.x.toFloat(), it.y.toFloat()) }.toTypedArray()
+                    srcMat.release()
+                    dstMat.release()
+                    transformed
+                }
+            } else {
+                arucoCorners
+            }
 
-            // --- Step 5: 结果构造 (回归 Canvas 2 坐标供渲染) ---
-            // 注意：所有的 PointF 现在都相对于 rgbaUndistorted 的尺寸
-            val finalContour = visionResult.contourPoints.map { mapper.mapWarpedToWork(it) }
-            val finalAxis = visionResult.axisPoints.map { mapper.mapWarpedToWork(it) }
-            val finalTail = visionResult.purpleRootPoint?.let { mapper.mapWarpedToWork(it) }
-            val finalDiameterLines = visionResult.diameterLines.map { line -> line.map { mapper.mapWarpedToWork(it) } }
+            // --- Step 5: 结果构造 ---
+            val duration = System.currentTimeMillis() - startTime
+            val c1Bmp = workBitmap
+            val c2Bmp = matToBitmap(rgbaUndistorted)
+            val c3Bmp = matToBitmap(warpedRgba)
+            
+            // 根据当前选择的视图确定返回的 processedBitmap
+            val displayBitmap = when(viewMode) {
+                1 -> c1Bmp
+                2 -> c2Bmp
+                else -> c3Bmp
+            }
 
-            // ArUco 标记已经在 Canvas 2 上，仅需通过 invScale 还原回 Original Undistorted
-            // 但如果 UI 逻辑层也显示的是经过 AlgorithmProcessor 返回的 processedBitmap，
-            // 那么比例应当匹配 processedBitmap 的分辨率。
-            val processedBmp = matToBitmap(rgbaUndistorted)
+            Log.i(TAG, "<<< 管道执行完毕，总耗时: ${duration}ms >>>")
 
             return AlgorithmResult(
                 success = true,
@@ -134,15 +196,23 @@ object AlgorithmProcessor {
                 diameter = visionResult.diameterMm,
                 rawDiameter = visionResult.rawDiameterMm,
                 length = visionResult.lengthMm,
-                purpleRootPosition = if (finalTail != null) "(${finalTail.x.toInt()}, ${finalTail.y.toInt()})" else "未检测到",
-                asparagusRect = calculateBoundingRect(finalContour),
-                asparagusContour = finalContour,
-                tailPoint = finalTail,
-                axisPath = finalAxis,
-                diameterLine = finalDiameterLines,
-                arucoCorners = arucoCorners, // 已在物理去畸变空间
+                executionTimeMs = duration,
+                
+                // 坐标返回：对齐视图 3，直接使用标准画布坐标（10px/mm）
+                asparagusContour = visionResult.contourPoints,
+                axisPath = visionResult.axisPoints,
+                tailPoint = visionResult.purpleRootPoint,
+                diameterLine = visionResult.diameterLines,
+                asparagusRect = calculateBoundingRect(visionResult.contourPoints),
+                
+                arucoCorners = finalArucoCorners,
                 arucoIds = arucoIds,
-                processedBitmap = processedBmp
+                
+                canvas1Bitmap = c1Bmp,
+                canvas2Bitmap = c2Bmp,
+                canvas3Bitmap = c3Bmp,
+                processedBitmap = displayBitmap,
+                viewMode = viewMode
             )
 
         } catch (e: Exception) {
@@ -152,18 +222,32 @@ object AlgorithmProcessor {
             rgba.release()
             rgbaUndistorted.release()
             warpedRgba.release()
+            transMat?.release()
             mapper?.release()
         }
     }
 
-    private fun undistortImage(src: Mat, dst: Mat, intrinsic: FloatArray, distortion: FloatArray) {
+    private fun undistortImage(src: Mat, dst: Mat, intrinsic: FloatArray, distortion: FloatArray, currentW: Int, currentH: Int) {
         val camMatrix = Mat(3, 3, CvType.CV_32F)
-        camMatrix.put(0, 0, intrinsic[0].toDouble())
-        camMatrix.put(0, 1, intrinsic[4].toDouble())
-        camMatrix.put(0, 2, intrinsic[2].toDouble())
-        camMatrix.put(1, 1, intrinsic[1].toDouble())
-        camMatrix.put(1, 2, intrinsic[3].toDouble())
+        
+        // 关键逻辑：根据当前图像分辨率与传感器参考分辨率的比例，动态缩放内参
+        val scaleX = currentW.toDouble() / sensorReferenceWidth.toDouble()
+        val scaleY = currentH.toDouble() / sensorReferenceHeight.toDouble()
+        
+        val fx = intrinsic[0].toDouble() * scaleX
+        val fy = intrinsic[1].toDouble() * scaleY
+        val cx = intrinsic[2].toDouble() * scaleX
+        val cy = intrinsic[3].toDouble() * scaleY
+        val skew = intrinsic[4].toDouble() * scaleX
+        
+        camMatrix.put(0, 0, fx)
+        camMatrix.put(0, 1, skew)
+        camMatrix.put(0, 2, cx)
+        camMatrix.put(1, 1, fy)
+        camMatrix.put(1, 2, cy)
         camMatrix.put(2, 2, 1.0)
+        
+        Log.d(TAG, "执行去畸变: 比例X=%.3f, 焦距=(%.1f, %.1f), 主点=(%.1f, %.1f)".format(scaleX, fx, fy, cx, cy))
         
         val distCoeffs = MatOfDouble(*DoubleArray(distortion.size) { distortion[it].toDouble() })
         Calib3d.undistort(src, dst, camMatrix, distCoeffs)
@@ -186,8 +270,6 @@ object AlgorithmProcessor {
         val bottom = points.maxOf { it.y }.toInt()
         return Rect(left, top, right, bottom)
     }
-
-    private fun dist(p1: PointF, p2: PointF) = Math.sqrt(((p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y)).toDouble())
 
     private fun centerOf(corners: Array<PointF>): PointF {
         var x = 0f; var y = 0f

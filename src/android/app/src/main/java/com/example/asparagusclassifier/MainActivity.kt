@@ -45,8 +45,11 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     private lateinit var btnCapture: Button
     private lateinit var cbAuto: CheckBox
     private lateinit var tvResult: TextView
+    private lateinit var layoutResult: View
+    private lateinit var btnCloseResult: android.widget.ImageButton
     private lateinit var tts: TextToSpeech
     
+    private var currentViewMode = 3 // 1: Raw, 2: Corrected, 3: Analysis
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private val autoCaptureRunnable = object : java.lang.Runnable {
         override fun run() {
@@ -97,6 +100,14 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         btnCapture = findViewById(R.id.btnCapture)
         cbAuto = findViewById(R.id.cbAuto)
         tvResult = findViewById(R.id.tvResult)
+        layoutResult = findViewById(R.id.layoutResult)
+        btnCloseResult = findViewById(R.id.btnCloseResult)
+        
+        btnCloseResult.setOnClickListener {
+            layoutResult.visibility = View.GONE
+            overlayView.clearMarkers()
+            overlayView.visibility = View.GONE
+        }
         
         cameraManager.setOnSizeInfoListener(this)
         
@@ -165,6 +176,51 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     private var lastBitmap: Bitmap? = null
     private var lastSensorRotation: Int = 0
 
+    override fun onCreateOptionsMenu(menu: Menu?): Boolean {
+        menuInflater.inflate(R.menu.main_menu, menu)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        return when (item.itemId) {
+            R.id.menu_view_raw -> {
+                currentViewMode = 1
+                android.widget.Toast.makeText(this, "切换至：原始视图 (C1)", android.widget.Toast.LENGTH_SHORT).show()
+                true
+            }
+            R.id.menu_view_corrected -> {
+                currentViewMode = 2
+                android.widget.Toast.makeText(this, "切换至：去畸变视图 (C2)", android.widget.Toast.LENGTH_SHORT).show()
+                true
+            }
+            R.id.menu_view_analysis -> {
+                currentViewMode = 3
+                android.widget.Toast.makeText(this, "切换至：标准分析视图 (C3)", android.widget.Toast.LENGTH_SHORT).show()
+                true
+            }
+            R.id.action_about -> {
+                android.app.AlertDialog.Builder(this)
+                    .setTitle("冯氏芦笋工具")
+                    .setMessage("设计师：冯工\n数据架构：三画布诊断系统\n2026年4月")
+                    .setNeutralButton("下载校准图纸") { _, _ ->
+                        val intent = android.content.Intent(
+                            android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse("http://voicevon.vicp.io:7001/nc/index.php/s/pFMFmrWaT9CWpt4/download")
+                        )
+                        startActivity(intent)
+                    }
+                    .setPositiveButton("确定", null)
+                    .show()
+                true
+            }
+            R.id.action_exit -> {
+                finish()
+                true
+            }
+            else -> super.onOptionsItemSelected(item)
+        }
+    }
+
     private fun captureAndProcess() {
         Log.i("MainActivity", "开始分析按鈕被点击")
 
@@ -185,32 +241,66 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
 
         // 在后台线程执行适宽转 + OpenCV 分析，不阻塞主线程
         diskExecutor.execute {
+            // 2. 检查内参兼容性并根据需要弹出警告
+            if (!AlgorithmProcessor.isCalibrationValid && !warnedThisSession) {
+                runOnUiThread {
+                    showCompatibilityWarning { 
+                        // 用户确认后继续
+                        executeAnalysisPipeline(bitmap)
+                    }
+                }
+            } else {
+                executeAnalysisPipeline(bitmap)
+            }
+        }
+    }
+
+    private var warnedThisSession = false
+
+    private fun showCompatibilityWarning(onContinue: () -> Unit) {
+        android.app.AlertDialog.Builder(this)
+            .setTitle("机型兼容性提示")
+            .setMessage("检测到非标设备（当前型号: ${android.os.Build.MODEL}）。\n\n" +
+                    "由于硬件驱动限制，无法读取相机校准参数。系统已自动切换至“原始兼容模式”。\n\n" +
+                    "⚠️ 注意：由于缺乏光学纠偏，测量直径和粗度时可能会产生 10%-15% 的误差。建议仅作为参考。")
+            .setCancelable(false)
+            .setPositiveButton("已阅并继续") { _, _ ->
+                warnedThisSession = true
+                onContinue()
+            }
+            .setNegativeButton("退出程序") { _, _ ->
+                finish()
+            }
+            .show()
+    }
+
+    private fun executeAnalysisPipeline(bitmap: Bitmap) {
+        diskExecutor.execute {
             // 1. 获取预览图
-            // 注意：TextureView.getBitmap() 已包含 setTransform 应用的旋转，方向与用户所见一致
             val correctedBitmap = bitmap 
             Log.i("MainActivity", "Captured Bitmap 尺寸: ${correctedBitmap.width}x${correctedBitmap.height}")
 
             // 2. 运行算法
             val t0 = System.currentTimeMillis()
-            val result = AlgorithmProcessor.processImage(correctedBitmap)
+            // 传入当前选择的视图模式
+            val result = AlgorithmProcessor.processImage(correctedBitmap, currentViewMode)
             val elapsed = System.currentTimeMillis() - t0
-            Log.i("MainActivity", "算法耗时: ${elapsed}ms")
+            Log.i("MainActivity", "算法总耗时: ${elapsed}ms")
 
-            // 3. 保存调试图片 (无论成功失败都保存，用于分析)
+            // 3. 保存调试图片
             saveDebugBitmap(correctedBitmap, "aruco_debug")
 
-            // 4. 更新 UI 必须切回主线程
+            // 4. 更新 UI
             runOnUiThread {
-                // 如果算法返回了去畸变后的图 (Canvas 2)，则用它作为后续显示的基准
                 val finalDisplayBitmap = result.processedBitmap ?: correctedBitmap
                 lastBitmap = finalDisplayBitmap
-                lastSensorRotation = 0 // 已在位图层级对齐
+                lastSensorRotation = 0
                 
                 if (!result.success) {
                     Log.e("MainActivity", "识别失败: ${result.error}")
                 }
                 displayResult(result)
-                // 处理完成后恢复按鈕
+                // 恢复按钮状态
                 btnCapture.isEnabled = true
                 btnCapture.text = "开始分析"
             }
@@ -232,9 +322,24 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     }
 
     private fun displayResult(result: AlgorithmResult) {
+        if (!result.success) {
+            val errorMsg = "分析识别失败\n原因: ${result.error ?: "未知错误"}"
+            val spannable = SpannableString(errorMsg)
+            spannable.setSpan(android.text.style.ForegroundColorSpan(android.graphics.Color.RED), 
+                0, errorMsg.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            tvResult.text = spannable
+            layoutResult.visibility = View.VISIBLE
+            
+            // 失败时也更新标记显示（可能包含拒绝列表等辅助信息）
+            updateOverlay(result)
+            return
+        }
+
         val diameterStr = String.format(java.util.Locale.US, "%.1f", result.diameter)
         val rawStr = String.format(java.util.Locale.US, "%.1f", result.rawDiameter)
-        val plainText = "直径: $diameterStr mm (raw: $rawStr)\n长度: ${result.length.toInt()} mm"
+        val timeStr = String.format(java.util.Locale.US, "%.2f", result.executionTimeMs / 1000.0)
+        
+        val plainText = "直径: $diameterStr mm (raw: $rawStr)\n长度: ${result.length.toInt()} mm  [耗时: ${timeStr}s]"
         
         val spannable = SpannableString(plainText)
         val rawStart = plainText.indexOf("(raw:")
@@ -244,8 +349,17 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             spannable.setSpan(StyleSpan(Typeface.NORMAL), rawStart, rawEnd, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
         
+        // 耗时文本设为灰色并缩小
+        val timeStart = plainText.indexOf("[耗时:")
+        if (timeStart >= 0) {
+             spannable.setSpan(RelativeSizeSpan(0.6f), timeStart, plainText.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+             spannable.setSpan(android.text.style.ForegroundColorSpan(android.graphics.Color.GRAY), timeStart, plainText.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        
         tvResult.text = spannable
-        tvResult.visibility = View.VISIBLE
+        layoutResult.visibility = View.VISIBLE
+        
+        updateOverlay(result)
         
         val isZero = result.diameter <= 0.0
         
@@ -261,72 +375,54 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             handler.removeCallbacks(autoCaptureRunnable)
             handler.postDelayed(autoCaptureRunnable, delay)
         }
-        
-        // 显示 ArUco 标记（四边形）
-        if (result.arucoCorners != null && result.arucoIds != null && lastBitmap != null) {
-            val markers = result.arucoCorners.zip(result.arucoIds).map { (corners, id) ->
-                com.example.asparagusclassifier.ui.ArucoMarker(corners, id)
-            }
-            Log.d(TAG, "设置标记: Bitmap=${lastBitmap!!.width}x${lastBitmap!!.height}, 传感器旋转=${lastSensorRotation}°")
+    }
 
-            // 传入传感器旋转角度，让 OverlayView 知道如何将 bitmap 坐标旋转到屏幕方向
-            overlayView.setArucoMarkers(markers, lastBitmap!!.width, lastBitmap!!.height, lastSensorRotation)
-            overlayView.visibility = View.VISIBLE
-        }
+    private fun updateOverlay(result: AlgorithmResult) {
+        overlayView.clearMarkers()
         
-        // 显示芦笋区域
-        if (result.asparagusContour != null) {
-            overlayView.setAsparagusContour(result.asparagusContour)
-            // 设置紫根/尾部标记
-            overlayView.setAsparagusTail(result.tailPoint)
-            // 设置直径测量线 (支持多条)
-            overlayView.setDiameterLines(result.diameterLine)
-            // 设置轴线路径
-            overlayView.setAxisPath(result.axisPath)
-            
-            // 同时也设置矩形作为备份或调试信息（可选，OverlayView 现在优先画轮廓）
-            result.asparagusRect?.let { overlayView.setAsparagusRect(it) }
-            overlayView.visibility = View.VISIBLE
-        } else if (result.asparagusRect != null) {
-            // 回退到矩形
-            overlayView.setAsparagusRect(result.asparagusRect)
-            overlayView.visibility = View.VISIBLE
+        if (lastBitmap == null) return
+
+        // 策略：根据 viewMode 决定显示什么
+        when (result.viewMode) {
+            1 -> {
+                // 原始视图：不显示叠加
+                overlayView.visibility = View.INVISIBLE
+            }
+            2 -> {
+                // 去畸变视图：仅显示 ArUco 标记用于核验
+                if (result.arucoCorners != null && result.arucoIds != null) {
+                    val markers = result.arucoCorners.zip(result.arucoIds).map { (corners, id) ->
+                        com.example.asparagusclassifier.ui.ArucoMarker(corners, id)
+                    }
+                    overlayView.setArucoMarkers(markers, lastBitmap!!.width, lastBitmap!!.height, 0)
+                    overlayView.setBackgroundBitmap(result.processedBitmap)
+                    overlayView.visibility = View.VISIBLE
+                }
+            }
+            3 -> {
+                // 标准分析视图：显示芦笋轮廓与测量数据
+                if (result.asparagusContour != null) {
+                    val markers = if (result.arucoCorners != null && result.arucoIds != null) {
+                        result.arucoCorners.zip(result.arucoIds).map { (corners, id) ->
+                            com.example.asparagusclassifier.ui.ArucoMarker(corners, id)
+                        }
+                    } else emptyList()
+                    
+                    overlayView.setArucoMarkers(markers, lastBitmap!!.width, lastBitmap!!.height, 0)
+                    overlayView.setBackgroundBitmap(result.processedBitmap)
+                    overlayView.setAsparagusContour(result.asparagusContour)
+                    overlayView.setAsparagusTail(result.tailPoint)
+                    overlayView.setDiameterLines(result.diameterLine)
+                    overlayView.setAxisPath(result.axisPath)
+                    overlayView.visibility = View.VISIBLE
+                }
+            }
         }
     }
     
     
     private val diskExecutor = Executors.newSingleThreadExecutor()
 
-    
-    override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        menuInflater.inflate(R.menu.main_menu, menu)
-        return true
-    }
-
-    override fun onOptionsItemSelected(item: MenuItem): Boolean {
-        return when (item.itemId) {
-            R.id.action_about -> {
-                android.app.AlertDialog.Builder(this)
-                    .setTitle("冯氏芦笋工具")
-                    .setMessage("山东卷积分公司\n2026年2月")
-                    .setNeutralButton("下载校准图纸") { _, _ ->
-                        val intent = android.content.Intent(
-                            android.content.Intent.ACTION_VIEW,
-                            android.net.Uri.parse("http://voicevon.vicp.io:7001/nc/index.php/s/pFMFmrWaT9CWpt4/download")
-                        )
-                        startActivity(intent)
-                    }
-                    .setPositiveButton("确定", null)
-                    .show()
-                true
-            }
-            R.id.action_exit -> {
-                finish()
-                true
-            }
-            else -> super.onOptionsItemSelected(item)
-        }
-    }
     
     override fun onDestroy() {
         super.onDestroy()

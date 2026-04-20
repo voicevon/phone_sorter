@@ -82,7 +82,9 @@ class OverlayView @JvmOverloads constructor(
     // 传感器方向（和 MainActivity 进行位图旋转时一致）
     private var sensorRotation: Int = 0
     
+    private var backgroundBitmap: Bitmap? = null
     private val coordinateMatrix = Matrix()
+
 
     fun setAsparagusRect(rect: Rect) {
         asparagusRect = rect
@@ -117,6 +119,11 @@ class OverlayView @JvmOverloads constructor(
         updateMatrix()
         invalidate()
     }
+
+    fun setBackgroundBitmap(bitmap: Bitmap?) {
+        backgroundBitmap = bitmap
+        invalidate()
+    }
     
     fun clearMarkers() {
         arucoMarkers = null
@@ -125,6 +132,7 @@ class OverlayView @JvmOverloads constructor(
         tailPoint = null
         axisPath = null
         diameterLines = null
+        backgroundBitmap = null
         invalidate()
     }
 
@@ -163,6 +171,10 @@ class OverlayView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         
+        // 绘制背景图片（如果存在）
+        backgroundBitmap?.let { bmp ->
+            canvas.drawBitmap(bmp, coordinateMatrix, null)
+        }
 
         // 绘制 ArUco 标记（红色四边形 + ID）
         arucoMarkers?.forEach { marker ->

@@ -20,6 +20,11 @@ data class AlgorithmResult(
     val diameterLine: List<List<PointF>>? = null, // 多条直径测量线 (每条线2个点)
     val arucoCorners: List<Array<PointF>>? = null, // 每个标记的4个角点
     val arucoIds: List<Int>? = null,
-    val processedBitmap: android.graphics.Bitmap? = null, // 去畸变后的反馈图
+    val executionTimeMs: Long = 0,
+    val processedBitmap: android.graphics.Bitmap? = null, // 当前视图位图 (C1/C2/C3)
+    val canvas1Bitmap: android.graphics.Bitmap? = null, // 原始
+    val canvas2Bitmap: android.graphics.Bitmap? = null, // 去畸变
+    val canvas3Bitmap: android.graphics.Bitmap? = null, // 标准
+    val viewMode: Int = 3, // 1: Raw, 2: Undistorted, 3: Analysis
     val error: String? = null
 )

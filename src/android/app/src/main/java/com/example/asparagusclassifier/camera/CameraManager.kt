@@ -81,9 +81,14 @@ class CameraManager(private val context: Context, private val textureView: Textu
             try {
                 val distortion = characteristics.get(CameraCharacteristics.LENS_DISTORTION)
                 val intrinsic = characteristics.get(CameraCharacteristics.LENS_INTRINSIC_CALIBRATION)
-                if (distortion != null && intrinsic != null) {
+                val pixelArraySize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
+                
+                if (distortion != null && intrinsic != null && pixelArraySize != null) {
                     Log.i("CameraManager", "读取到畸变参数: ${distortion.joinToString()}")
-                    com.example.asparagusclassifier.algorithm.AlgorithmProcessor.setCalibrationData(intrinsic, distortion)
+                    Log.i("CameraManager", "传感器参考分辨率: ${pixelArraySize.width}x${pixelArraySize.height}")
+                    com.example.asparagusclassifier.algorithm.AlgorithmProcessor.setCalibrationData(
+                        intrinsic, distortion, pixelArraySize.width, pixelArraySize.height
+                    )
                 }
             } catch (e: Exception) {
                 Log.w("CameraManager", "无法读取畸变参数: ${e.message}")

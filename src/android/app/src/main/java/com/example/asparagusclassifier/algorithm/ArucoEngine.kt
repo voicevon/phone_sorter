@@ -20,9 +20,10 @@ class ArucoEngine(
     private val dictionary = Objdetect.getPredefinedDictionary(dictionaryId)
     private val detectorParams = DetectorParameters().apply {
         set_adaptiveThreshWinSizeMin(3)
-        set_adaptiveThreshWinSizeMax(23)
-        set_adaptiveThreshWinSizeStep(10)
+        set_adaptiveThreshWinSizeMax(63) // 扩大搜索窗口，适应高分辨率画面
+        set_adaptiveThreshWinSizeStep(5)  // 提高搜索密度
         set_minMarkerPerimeterRate(0.01)
+        set_cornerRefinementMethod(Objdetect.CORNER_REFINE_SUBPIX) // 启用子像素精细化
     }
     private val detector = ArucoDetector(dictionary, detectorParams)
 
@@ -47,20 +48,30 @@ class ArucoEngine(
 
         // 执行检测
         detector.detectMarkers(gray, corners, ids, rejected)
-        Log.d(TAG, "检测到标记数: ${ids.rows()}")
+        val detectedCount = ids.rows()
+        val rejectedCount = rejected.size
+        Log.i(TAG, "ArUco 检测完成: 发现标记数=$detectedCount, 拒绝的候选数=$rejectedCount")
 
         // 解析结果
         val markerMap = mutableMapOf<Int, Array<PointF>>()
-        if (ids.rows() > 0) {
-            for (i in 0 until corners.size) {
+        val foundIds = mutableListOf<Int>()
+        if (detectedCount > 0) {
+            for (i in 0 until detectedCount) {
                 val id = ids.get(i, 0)[0].toInt()
+                foundIds.add(id)
                 val cornerMat = corners[i]
                 val decoded = Array(4) { j -> 
                     PointF(cornerMat.get(0, j)[0].toFloat(), cornerMat.get(0, j)[1].toFloat())
                 }
                 markerMap[id] = decoded
+                
+                // 计算并记录中心点，方便判断坐标是否在合理范围内
+                val centerX = (decoded[0].x + decoded[1].x + decoded[2].x + decoded[3].x) / 4f
+                val centerY = (decoded[0].y + decoded[1].y + decoded[2].y + decoded[3].y) / 4f
+                Log.d(TAG, "  -> ID: $id, 中心点: (%.1f, %.1f)".format(centerX, centerY))
             }
         }
+        Log.i(TAG, "当前画面中包含的 ID 列表: $foundIds")
 
         // 验证关键标记
         val requiredIds = listOf(
@@ -76,9 +87,12 @@ class ArucoEngine(
         for (m in rejected) m.release()
 
         return if (missingIds.isEmpty()) {
+            Log.i(TAG, "所有标定标记已找齐，可以进行透视变换")
             DetectionResult(true, markerMap)
         } else {
-            DetectionResult(false, markerMap, "缺失关键标记: $missingIds")
+            val errorMsg = "检测失败，找齐:${markerMap.keys}, 缺失:$missingIds (已忽略干扰项:${markerMap.keys.filter { it !in requiredIds }})"
+            Log.w(TAG, "ArUco 检测失败诊断: $errorMsg, 拒绝候选数=$rejectedCount")
+            DetectionResult(false, markerMap, errorMsg)
         }
     }
 }

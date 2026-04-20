@@ -37,10 +37,17 @@ object AsparagusVisionCore {
         try {
             Imgproc.cvtColor(warpedRgba, hsv, Imgproc.COLOR_RGB2HSV)
             
-            // 1. 绿色分割
-            Core.inRange(hsv, AlgorithmConfig.LOWER_GREEN, AlgorithmConfig.UPPER_GREEN, mask)
+            // 1. 区域锁定 (ROI Masking)：只分析板内区域
+            val roiMask = Mat.zeros(warpedRgba.size(), CvType.CV_8UC1)
+            val boardRect = Rect(10, 10, warpedRgba.cols() - 20, warpedRgba.rows() - 20)
+            Imgproc.rectangle(roiMask, boardRect, Scalar(255.0), -1)
             
-            // 形态学滤波
+            // 2. 颜色分割 (绿色)
+            Core.inRange(hsv, AlgorithmConfig.LOWER_GREEN, AlgorithmConfig.UPPER_GREEN, mask)
+            Core.bitwise_and(mask, roiMask, mask) // 强制裁剪
+            roiMask.release()
+            
+            // 3. 形态学滤波
             val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0))
             Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN, kernel)
             Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE, kernel)

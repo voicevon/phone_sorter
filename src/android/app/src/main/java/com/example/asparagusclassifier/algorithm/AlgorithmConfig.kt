@@ -11,23 +11,25 @@ object AlgorithmConfig {
     // ArUco 标记 ID 配置
     const val ID_TL = 10
     const val ID_TR = 13
-    const val ID_BR = 40
-    const val ID_BL = 42
+    const val ID_BL = 40
+    const val ID_BR = 42
 
     // 物理尺寸基准 (单位: mm)
     const val BOARD_WIDTH_MM = 167.0
     const val BOARD_HEIGHT_MM = 250.0
     const val MM_TO_PX = 10.0 // 标准化分辨率: 10px/mm
 
-    // 标准化画布尺寸
-    const val TARGET_WIDTH = 2000
-    const val TARGET_HEIGHT = 3000
+    // 标准化画布配置 (10px/mm)
+    const val PADDING_PX = 50.0 // 边缘留白 5mm，防止标记被裁切
+    
+    const val TARGET_WIDTH = 1770  // (167.0 * 10) + 100
+    const val TARGET_HEIGHT = 2600 // (250.0 * 10) + 100
 
-    // 标准化坐标 (中心点) - 相对于 TARGET_WIDTH/HEIGHT
-    val TARGET_TL = Point(150.0, 250.0)
-    val TARGET_TR = Point(150.0 + BOARD_WIDTH_MM * MM_TO_PX, 250.0)
-    val TARGET_BR = Point(150.0 + BOARD_WIDTH_MM * MM_TO_PX, 250.0 + BOARD_HEIGHT_MM * MM_TO_PX)
-    val TARGET_BL = Point(150.0, 250.0 + BOARD_HEIGHT_MM * MM_TO_PX)
+    // 标准化坐标 (映射 4 个标记中心点，保持 5mm 边距)
+    val TARGET_TL = Point(PADDING_PX, PADDING_PX)
+    val TARGET_TR = Point(TARGET_WIDTH - PADDING_PX, PADDING_PX)
+    val TARGET_BR = Point(TARGET_WIDTH - PADDING_PX, TARGET_HEIGHT - PADDING_PX)
+    val TARGET_BL = Point(PADDING_PX, TARGET_HEIGHT - PADDING_PX)
 
     // 图像预处理参数
     const val SCAN_MAX_SIDE = 1600 // 工作分辨率上限
