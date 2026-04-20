@@ -27,7 +27,8 @@ class CameraManager(private val context: Context, private val textureView: Textu
     
     interface OnSizeInfoListener {
         fun onSizeInfoReceived(cameraWidth: Int, cameraHeight: Int, cameraRatio: Float, 
-                              previewWidth: Int, previewHeight: Int, previewRatio: Float)
+                              previewWidth: Int, previewHeight: Int, previewRatio: Float,
+                              calibration: com.example.asparagusclassifier.algorithm.CalibrationData?)
     }
     
     fun startCamera() {
@@ -61,6 +62,7 @@ class CameraManager(private val context: Context, private val textureView: Textu
     }
     
     private var currentPreviewSize: Size? = null
+    private var lastCalibration: com.example.asparagusclassifier.algorithm.CalibrationData? = null
 
     /** 返回相机传感器相对于设备自然方向的旋转角度（通常为 90 或 270）*/
     fun getSensorOrientation(): Int = sensorOrientation
@@ -84,11 +86,10 @@ class CameraManager(private val context: Context, private val textureView: Textu
                 val pixelArraySize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE)
                 
                 if (distortion != null && intrinsic != null && pixelArraySize != null) {
-                    Log.i("CameraManager", "读取到畸变参数: ${distortion.joinToString()}")
-                    Log.i("CameraManager", "传感器参考分辨率: ${pixelArraySize.width}x${pixelArraySize.height}")
-                    com.example.asparagusclassifier.algorithm.AlgorithmProcessor.setCalibrationData(
+                    lastCalibration = com.example.asparagusclassifier.algorithm.CalibrationData(
                         intrinsic, distortion, pixelArraySize.width, pixelArraySize.height
                     )
+                    Log.i("CameraManager", "读取到标定参数，传感器分辨率: ${pixelArraySize.width}x${pixelArraySize.height}")
                 }
             } catch (e: Exception) {
                 Log.w("CameraManager", "无法读取畸变参数: ${e.message}")
@@ -197,7 +198,7 @@ class CameraManager(private val context: Context, private val textureView: Textu
             textureView.requestLayout()
             
             onSizeInfoListener?.onSizeInfoReceived(currentPreviewSize?.width ?: 0, 
-                currentPreviewSize?.height ?: 0, 1.77f, nWidth, nHeight, targetRatio)
+                currentPreviewSize?.height ?: 0, 1.77f, nWidth, nHeight, targetRatio, lastCalibration)
         }
     }
 

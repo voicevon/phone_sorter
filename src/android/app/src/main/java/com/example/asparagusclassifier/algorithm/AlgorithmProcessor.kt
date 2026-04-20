@@ -18,38 +18,10 @@ import android.graphics.PointF
 object AlgorithmProcessor {
     private const val TAG = "AlgorithmProcessor"
 
-    // 相机校准数据
-    private var intrinsicCalibration: FloatArray? = null
-    private var lensDistortion: FloatArray? = null
-    private var sensorReferenceWidth: Int = 0
-    private var sensorReferenceHeight: Int = 0
-    
-    // 兼容性标志位
-    var isCalibrationValid: Boolean = true
-        private set
-
     // 子组件
     private val arucoEngine = ArucoEngine()
-
-    fun setCalibrationData(intrinsic: FloatArray, distortion: FloatArray, sensorWidth: Int, sensorHeight: Int) {
-        this.intrinsicCalibration = intrinsic
-        this.lensDistortion = distortion
-        this.sensorReferenceWidth = sensorWidth
-        this.sensorReferenceHeight = sensorHeight
-        
-        // 校验内参合法性：如果焦距 (fx, fy) 均为 0，则视为无效
-        if (intrinsic.size >= 2 && intrinsic[0] == 0f && intrinsic[1] == 0f) {
-            isCalibrationValid = false
-            Log.e(TAG, "检测到无效的相机内参 (焦距为0)！将进入原始兼容模式。")
-            // 立即后台上报异常机型
-            com.example.asparagusclassifier.util.MqttReporter.reportInvalidIntrinsic(intrinsic, sensorWidth, sensorHeight)
-        } else {
-            isCalibrationValid = true
-            Log.i(TAG, "已更新相机校准参数及参考分辨率: ${sensorWidth}x${sensorHeight}")
-        }
-    }
     
-    fun processImage(bitmap: Bitmap, viewMode: Int = 3): AlgorithmResult {
+    fun processImage(bitmap: Bitmap, calibration: CalibrationData?, viewMode: Int = 3): AlgorithmResult {
         val startTime = System.currentTimeMillis()
         Log.i(TAG, ">>> 开始执行算法管道 (三画布架构) <<<")
         
@@ -77,16 +49,12 @@ object AlgorithmProcessor {
             Utils.bitmapToMat(workBitmap, rgba)
             
             // --- Step 1: 物理去畸变 (生成 Canvas 2) ---
-            if (isCalibrationValid && intrinsicCalibration != null && lensDistortion != null && sensorReferenceWidth > 0) {
-                undistortImage(rgba, rgbaUndistorted, intrinsicCalibration!!, lensDistortion!!, workBitmap.width, workBitmap.height)
+            if (calibration != null && calibration.isValid()) {
+                undistortImage(rgba, rgbaUndistorted, calibration, workBitmap.width, workBitmap.height)
                 Log.i(TAG, "[Step 1] 去畸变完成")
             } else {
                 rgba.copyTo(rgbaUndistorted)
-                if (!isCalibrationValid) {
-                    Log.w(TAG, "[Step 1] 机型不兼容，已跳过去畸变 (原始模式)")
-                } else {
-                    Log.w(TAG, "[Step 1] 跳过去畸变 (校准参数缺失)")
-                }
+                Log.w(TAG, "[Step 1] 跳过去畸变 (机型不兼容或校准参数缺失)")
             }
             
             // --- Step 2: 在物理画布上检测 ArUco (Canvas 2 基准) ---
@@ -160,9 +128,16 @@ object AlgorithmProcessor {
             }
             Log.i(TAG, "[Step 4] 芦笋视觉分析成功: 直径=%.1fmm, 长度=%.1fmm".format(visionResult.diameterMm, visionResult.lengthMm))
             
-            // --- Step 4.5: 坐标同步 (针对 C3 模式映射 ArUco 标记点) ---
-            val finalArucoCorners = if (viewMode == 3 && transMat != null) {
-                arucoCorners.map { corners ->
+            // --- Step 4.5: 坐标同步与反向投影 ---
+            var finalArucoCorners = arucoCorners
+            var finalContour = visionResult.contourPoints
+            var finalAxis = visionResult.axisPoints
+            var finalTail = visionResult.purpleRootPoint
+            var finalDiameterLines = visionResult.diameterLines
+
+            if (viewMode == 3 && transMat != null) {
+                // 将标记点从 C2 投影到 C3 (用于标准分析视图叠加)
+                finalArucoCorners = arucoCorners.map { corners ->
                     val srcMat = MatOfPoint2f(*corners.map { org.opencv.core.Point(it.x.toDouble(), it.y.toDouble()) }.toTypedArray())
                     val dstMat = MatOfPoint2f()
                     Core.perspectiveTransform(srcMat, dstMat, transMat)
@@ -171,8 +146,14 @@ object AlgorithmProcessor {
                     dstMat.release()
                     transformed
                 }
-            } else {
-                arucoCorners
+            } else if (viewMode == 2 && mapper != null) {
+                // 反透视变换：将分析结果从 C3 投影回 C2 (用于去畸变视图叠加)
+                finalContour = visionResult.contourPoints.map { mapper!!.mapWarpedToWork(it) }
+                finalAxis = visionResult.axisPoints.map { mapper!!.mapWarpedToWork(it) }
+                finalTail = visionResult.purpleRootPoint?.let { mapper!!.mapWarpedToWork(it) }
+                finalDiameterLines = visionResult.diameterLines.map { line ->
+                    line.map { mapper!!.mapWarpedToWork(it) }
+                }
             }
 
             // --- Step 5: 结果构造 ---
@@ -198,12 +179,12 @@ object AlgorithmProcessor {
                 length = visionResult.lengthMm,
                 executionTimeMs = duration,
                 
-                // 坐标返回：对齐视图 3，直接使用标准画布坐标（10px/mm）
-                asparagusContour = visionResult.contourPoints,
-                axisPath = visionResult.axisPoints,
-                tailPoint = visionResult.purpleRootPoint,
-                diameterLine = visionResult.diameterLines,
-                asparagusRect = calculateBoundingRect(visionResult.contourPoints),
+                // 坐标返回：根据视图模式已同步
+                asparagusContour = finalContour,
+                axisPath = finalAxis,
+                tailPoint = finalTail,
+                diameterLine = finalDiameterLines,
+                asparagusRect = calculateBoundingRect(finalContour),
                 
                 arucoCorners = finalArucoCorners,
                 arucoIds = arucoIds,
@@ -227,18 +208,18 @@ object AlgorithmProcessor {
         }
     }
 
-    private fun undistortImage(src: Mat, dst: Mat, intrinsic: FloatArray, distortion: FloatArray, currentW: Int, currentH: Int) {
+    private fun undistortImage(src: Mat, dst: Mat, calibration: CalibrationData, currentW: Int, currentH: Int) {
         val camMatrix = Mat(3, 3, CvType.CV_32F)
         
         // 关键逻辑：根据当前图像分辨率与传感器参考分辨率的比例，动态缩放内参
-        val scaleX = currentW.toDouble() / sensorReferenceWidth.toDouble()
-        val scaleY = currentH.toDouble() / sensorReferenceHeight.toDouble()
+        val scaleX = currentW.toDouble() / calibration.sensorWidth.toDouble()
+        val scaleY = currentH.toDouble() / calibration.sensorHeight.toDouble()
         
-        val fx = intrinsic[0].toDouble() * scaleX
-        val fy = intrinsic[1].toDouble() * scaleY
-        val cx = intrinsic[2].toDouble() * scaleX
-        val cy = intrinsic[3].toDouble() * scaleY
-        val skew = intrinsic[4].toDouble() * scaleX
+        val fx = calibration.intrinsic[0].toDouble() * scaleX
+        val fy = calibration.intrinsic[1].toDouble() * scaleY
+        val cx = calibration.intrinsic[2].toDouble() * scaleX
+        val cy = calibration.intrinsic[3].toDouble() * scaleY
+        val skew = calibration.intrinsic[4].toDouble() * scaleX
         
         camMatrix.put(0, 0, fx)
         camMatrix.put(0, 1, skew)
@@ -249,7 +230,7 @@ object AlgorithmProcessor {
         
         Log.d(TAG, "执行去畸变: 比例X=%.3f, 焦距=(%.1f, %.1f), 主点=(%.1f, %.1f)".format(scaleX, fx, fy, cx, cy))
         
-        val distCoeffs = MatOfDouble(*DoubleArray(distortion.size) { distortion[it].toDouble() })
+        val distCoeffs = MatOfDouble(*DoubleArray(calibration.distortion.size) { calibration.distortion[it].toDouble() })
         Calib3d.undistort(src, dst, camMatrix, distCoeffs)
         
         camMatrix.release()

@@ -195,25 +195,6 @@ class OverlayView @JvmOverloads constructor(
             }
             path.close()
             canvas.drawPath(path, redPaint)
-            
-            // 绘制 ID 文本（在第一个角点上方）
-            val idText = "ID: ${marker.id}"
-            val textX = dstPoints[0]
-            val textY = dstPoints[1] - 10f
-            
-            // 绘制文本背景
-            val textBounds = Rect()
-            textPaint.getTextBounds(idText, 0, idText.length, textBounds)
-            canvas.drawRect(
-                textX,
-                textY - textBounds.height() - 10f,
-                textX + textBounds.width() + 20f,
-                textY + 5f,
-                textBackgroundPaint
-            )
-            
-            // 绘制文本
-            canvas.drawText(idText, textX + 10f, textY, textPaint)
         }
         
         // 绘制芦笋区域（绿色）

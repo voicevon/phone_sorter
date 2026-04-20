@@ -45,7 +45,7 @@ object AlgorithmConfig {
     // 测量参数
     const val MIN_CONTOUR_AREA = 500.0
     const val DIAMETER_CORRECTION_MM = 1.5 // 直径修正值（补偿边缘模糊）
-    val SAMPLING_OFFSETS_MM = listOf(5.0, 10.0, 15.0) // 采样位置（距根部）
+    val SAMPLING_OFFSETS_MM = listOf(10.0, 15.0, 20.0) // 采样位置（距根部距离增加 5mm，即 10, 15, 20mm）
 
     // 标定校验阈值
     const val MAX_RATIO_ERROR = 0.15 // 最大允许透视变形误差 (15%)

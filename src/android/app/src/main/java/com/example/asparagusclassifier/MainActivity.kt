@@ -49,7 +49,8 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     private lateinit var btnCloseResult: android.widget.ImageButton
     private lateinit var tts: TextToSpeech
     
-    private var currentViewMode = 3 // 1: Raw, 2: Corrected, 3: Analysis
+    private var currentViewMode = 2 // 1: Raw, 2: Corrected, 3: Analysis
+    private var currentCalibration: com.example.asparagusclassifier.algorithm.CalibrationData? = null
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private val autoCaptureRunnable = object : java.lang.Runnable {
         override fun run() {
@@ -104,10 +105,14 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         btnCloseResult = findViewById(R.id.btnCloseResult)
         
         btnCloseResult.setOnClickListener {
-            layoutResult.visibility = View.GONE
-            overlayView.clearMarkers()
-            overlayView.visibility = View.GONE
+            dismissResultView()
         }
+        
+        // 允许通过点击屏幕任何区域（除按钮外）退出结果显示
+        findViewById<View>(R.id.main_root).setOnClickListener { dismissResultView() }
+        textureView.setOnClickListener { dismissResultView() }
+        overlayView.setOnClickListener { dismissResultView() }
+        overlayView.isClickable = true // 确保可以拦截点击
         
         cameraManager.setOnSizeInfoListener(this)
         
@@ -156,8 +161,18 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         }
     }
     
+    private fun dismissResultView() {
+        if (layoutResult.visibility == View.VISIBLE) {
+            layoutResult.visibility = View.GONE
+            overlayView.clearMarkers()
+            overlayView.visibility = View.GONE
+            Log.d(TAG, "用户点击屏幕，收起分析结果")
+        }
+    }
+
     override fun onSizeInfoReceived(cameraWidth: Int, cameraHeight: Int, cameraRatio: Float,
-                                   previewWidth: Int, previewHeight: Int, previewRatio: Float) {
+                                   previewWidth: Int, previewHeight: Int, previewRatio: Float,
+                                   calibration: com.example.asparagusclassifier.algorithm.CalibrationData?) {
         // UI 更新必须在主线程
         runOnUiThread {
             val text = "直径: 0.0 mm\n长度: 0.0 mm"
@@ -165,11 +180,20 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             tvResult.visibility = View.VISIBLE
             // Compute the actual preview rectangle relative to the OverlayView
             // Since they are constrained together, the offset is 0,0
-            overlayView.setDisplayRect(0f, 0f, textureView.width.toFloat(), textureView.height.toFloat())
-            // Also pass sensor orientation for proper rotation handling
-            val sensorRot = cameraManager.getSensorOrientation()
-            // Store for later use when setting markers
-            // (we'll use this value in captureAndProcess)
+            // 核心修复：直接使用回调给出的 previewWidth/Height 设置 OverlayView 渲染边界
+            // 不再直接读取 textureView.width/height，因为布局过程可能是异步延迟的
+            overlayView.setDisplayRect(0f, 0f, previewWidth.toFloat(), previewHeight.toFloat())
+            
+            // 更新本会话的标定数据
+            this.currentCalibration = calibration
+            Log.i(TAG, "已接收到相机尺寸及标定信息: ${cameraWidth}x${cameraHeight}, 校准存在=${calibration != null}")
+            
+            // 如果标定无效且尚未上报，则进行上报
+            if (calibration == null || !calibration.isValid()) {
+                com.example.asparagusclassifier.util.MqttReporter.reportInvalidIntrinsic(
+                    calibration?.intrinsic, cameraWidth, cameraHeight
+                )
+            }
         }
     }
 
@@ -178,24 +202,38 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
 
     override fun onCreateOptionsMenu(menu: Menu?): Boolean {
         menuInflater.inflate(R.menu.main_menu, menu)
+        // 根据初始 currentViewMode 设置勾选状态
+        val initialId = when(currentViewMode) {
+            1 -> R.id.menu_view_raw
+            2 -> R.id.menu_view_corrected
+            else -> R.id.menu_view_analysis
+        }
+        menu?.findItem(initialId)?.isChecked = true
         return true
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
             R.id.menu_view_raw -> {
+                item.isChecked = true
                 currentViewMode = 1
                 android.widget.Toast.makeText(this, "切换至：原始视图 (C1)", android.widget.Toast.LENGTH_SHORT).show()
                 true
             }
             R.id.menu_view_corrected -> {
+                item.isChecked = true
                 currentViewMode = 2
                 android.widget.Toast.makeText(this, "切换至：去畸变视图 (C2)", android.widget.Toast.LENGTH_SHORT).show()
                 true
             }
             R.id.menu_view_analysis -> {
+                item.isChecked = true
                 currentViewMode = 3
                 android.widget.Toast.makeText(this, "切换至：标准分析视图 (C3)", android.widget.Toast.LENGTH_SHORT).show()
+                true
+            }
+            R.id.action_camera_params -> {
+                showCameraParamsDialog()
                 true
             }
             R.id.action_about -> {
@@ -242,7 +280,8 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         // 在后台线程执行适宽转 + OpenCV 分析，不阻塞主线程
         diskExecutor.execute {
             // 2. 检查内参兼容性并根据需要弹出警告
-            if (!AlgorithmProcessor.isCalibrationValid && !warnedThisSession) {
+            val cal = currentCalibration
+            if ((cal == null || !cal.isValid()) && !warnedThisSession) {
                 runOnUiThread {
                     showCompatibilityWarning { 
                         // 用户确认后继续
@@ -282,8 +321,8 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
 
             // 2. 运行算法
             val t0 = System.currentTimeMillis()
-            // 传入当前选择的视图模式
-            val result = AlgorithmProcessor.processImage(correctedBitmap, currentViewMode)
+            // 传入当前选择的视图模式及标定上下文
+            val result = AlgorithmProcessor.processImage(correctedBitmap, currentCalibration, currentViewMode)
             val elapsed = System.currentTimeMillis() - t0
             Log.i("MainActivity", "算法总耗时: ${elapsed}ms")
 
@@ -323,7 +362,10 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
 
     private fun displayResult(result: AlgorithmResult) {
         if (!result.success) {
-            val errorMsg = "分析识别失败\n原因: ${result.error ?: "未知错误"}"
+            // 简化报错信息：如果是 Aruco 检测问题，统称为“四角定位不完全”
+            val readableError = if (result.error?.contains("标识") == true) "四角定位不完全" else (result.error ?: "未知错误")
+            val errorMsg = "分析失败 原因：$readableError"
+            
             val spannable = SpannableString(errorMsg)
             spannable.setSpan(android.text.style.ForegroundColorSpan(android.graphics.Color.RED), 
                 0, errorMsg.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
@@ -389,13 +431,21 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                 overlayView.visibility = View.INVISIBLE
             }
             2 -> {
-                // 去畸变视图：仅显示 ArUco 标记用于核验
+                // 去畸变视图：显示 ArUco 标记及投影回物理空间的测量结果
                 if (result.arucoCorners != null && result.arucoIds != null) {
                     val markers = result.arucoCorners.zip(result.arucoIds).map { (corners, id) ->
                         com.example.asparagusclassifier.ui.ArucoMarker(corners, id)
                     }
                     overlayView.setArucoMarkers(markers, lastBitmap!!.width, lastBitmap!!.height, 0)
                     overlayView.setBackgroundBitmap(result.processedBitmap)
+                    
+                    // 显示反向投影后的芦笋特征线
+                    if (result.asparagusContour != null) {
+                        overlayView.setAsparagusContour(result.asparagusContour)
+                        overlayView.setAsparagusTail(result.tailPoint)
+                        overlayView.setDiameterLines(result.diameterLine)
+                        overlayView.setAxisPath(result.axisPath)
+                    }
                     overlayView.visibility = View.VISIBLE
                 }
             }
@@ -424,6 +474,41 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     private val diskExecutor = Executors.newSingleThreadExecutor()
 
     
+    private fun showCameraParamsDialog() {
+        val cal = currentCalibration
+        val message = if (cal != null && cal.isValid()) {
+            """
+            模型: ${android.os.Build.MODEL}
+            状态: 相机校准数据已加载
+            
+            【内参矩阵 (Intrinsic)】
+            fx (焦距 X): %.3f
+            fy (焦距 Y): %.3f
+            cx (光心 X): %.3f
+            cy (光心 Y): %.3f
+            skew (偏斜): %.3f
+            
+            【畸变参数 (Distortion)】
+            ${cal.distortion.joinToString(", ") { String.format("%.5f", it) }}
+            
+            【参考分辨率】
+            宽度: ${cal.sensorWidth} px
+            高度: ${cal.sensorHeight} px
+            """.trimIndent().format(
+                cal.intrinsic[0], cal.intrinsic[1], 
+                cal.intrinsic[2], cal.intrinsic[3], cal.intrinsic[4]
+            )
+        } else {
+            "当前设备不支持读取相机标定参数，系统正在以“原始兼容模式”运行。"
+        }
+
+        android.app.AlertDialog.Builder(this)
+            .setTitle("相机标定诊断")
+            .setMessage(message)
+            .setPositiveButton("确定", null)
+            .show()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(autoCaptureRunnable)
