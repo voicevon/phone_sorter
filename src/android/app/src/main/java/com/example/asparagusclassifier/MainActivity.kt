@@ -41,6 +41,9 @@ import android.text.style.StyleSpan
 import android.graphics.Typeface
 import java.util.Locale
 import java.util.concurrent.Executors
+import androidx.lifecycle.ViewModelProvider
+import com.example.asparagusclassifier.ui.DiagnosticDialog
+import com.example.asparagusclassifier.data.VisionRepository
 
 class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     
@@ -54,18 +57,17 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     private lateinit var btnCloseResult: android.widget.ImageButton
     private lateinit var tvHUDPose: TextView
     private lateinit var tvHUDStatus: TextView
+    private lateinit var viewModel: MainViewModel
+    private lateinit var visionRepository: VisionRepository
     private lateinit var tts: TextToSpeech
     
-    private var currentViewMode = 2 // 1: Raw, 2: Corrected, 3: Analysis
-    private var currentCalibration: com.example.asparagusclassifier.algorithm.CalibrationData? = null
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private var lastPoseWorldText: CharSequence = "Cam Pos (World):\nX:--  Y:--  Z:--"
     
-    private var isRealtimePoseActive = true
     private val realtimePoseHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val realtimePoseRunnable = object : java.lang.Runnable {
         override fun run() {
-            if (isRealtimePoseActive) {
+            if (viewModel.isRealtimePoseActive.value == true) {
                 updateRealtimePose()
             }
             realtimePoseHandler.postDelayed(this, 300) // 约 3 FPS，平衡性能与发热
@@ -113,6 +115,10 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         }
         
         setContentView(R.layout.activity_main)
+
+        viewModel = ViewModelProvider(this).get(MainViewModel::class.java)
+        visionRepository = VisionRepository(this)
+        setupObservers()
         
         textureView = findViewById(R.id.textureView)
         overlayView = findViewById(R.id.overlayView)
@@ -143,15 +149,11 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         }
         
         cbAuto.setOnCheckedChangeListener { _, isChecked ->
-            if (isChecked) {
-                handler.post(autoCaptureRunnable)
-            } else {
-                handler.removeCallbacks(autoCaptureRunnable)
-            }
+            viewModel.setAutoCaptureEnabled(isChecked)
         }
         
         findViewById<Button>(R.id.btnShowDiag).setOnClickListener {
-            lastResult?.let { showDiagnosticDialog(it) }
+            viewModel.lastResult.value?.let { DiagnosticDialog.show(this, it) }
         }
         
         // 权限检查和启动逻辑已移至 onResume
@@ -161,14 +163,14 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         super.onResume()
         Log.i(TAG, "Activity Resumed, 尝试恢复相机")
         checkCameraPermission()
-        isRealtimePoseActive = true
+        viewModel.setRealtimePoseActive(true)
         realtimePoseHandler.post(realtimePoseRunnable)
     }
 
     override fun onStop() {
         super.onStop()
         Log.i(TAG, "Activity Stopped, 释放相机资源")
-        isRealtimePoseActive = false
+        viewModel.setRealtimePoseActive(false)
         realtimePoseHandler.removeCallbacks(realtimePoseRunnable)
         cameraManager.release()
     }
@@ -191,12 +193,20 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         }
     }
     
-    private fun dismissResultView() {
-        if (layoutResult.visibility == View.VISIBLE) {
-            layoutResult.visibility = View.GONE
-            overlayView.clearMarkers()
-            overlayView.visibility = View.GONE
-            Log.d(TAG, "用户点击屏幕，收起分析结果")
+    private fun setupObservers() {
+        viewModel.viewMode.observe(this) { mode ->
+            // 这里可以处理一些模式切换时的即时 UI 刷新
+        }
+        
+        viewModel.lastResult.observe(this) { result ->
+            result?.let { displayResult(it) }
+        }
+        
+        viewModel.isAutoCaptureEnabled.observe(this) { enabled ->
+            handler.removeCallbacks(autoCaptureRunnable)
+            if (enabled) {
+                handler.post(autoCaptureRunnable)
+            }
         }
     }
 
@@ -208,14 +218,11 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             val text = "直径: 0.0 mm\n长度: 0.0 mm"
             tvResult.text = text
             tvResult.visibility = View.VISIBLE
-            // Compute the actual preview rectangle relative to the OverlayView
-            // Since they are constrained together, the offset is 0,0
-            // 核心修复：直接使用回调给出的 previewWidth/Height 设置 OverlayView 渲染边界
-            // 不再直接读取 textureView.width/height，因为布局过程可能是异步延迟的
+            
             overlayView.setDisplayRect(0f, 0f, previewWidth.toFloat(), previewHeight.toFloat())
             
-            // 更新本会话的标定数据
-            this.currentCalibration = calibration
+            // 更新 ViewModel 中的标定数据
+            viewModel.setCurrentCalibration(calibration)
             Log.i(TAG, "已接收到相机尺寸及标定信息: ${cameraWidth}x${cameraHeight}, 校准存在=${calibration != null}")
             
             // 如果标定无效且尚未上报，则进行上报
@@ -228,13 +235,13 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     }
 
     private var lastBitmap: Bitmap? = null
-    private var lastResult: AlgorithmResult? = null // 保存最近一次分析结果用于诊断图
     private var lastSensorRotation: Int = 0
 
     override fun onCreateOptionsMenu(menu: Menu?): Boolean {
         menuInflater.inflate(R.menu.main_menu, menu)
-        // 根据初始 currentViewMode 设置勾选状态
-        val initialId = when(currentViewMode) {
+        // 根据初始 ViewModel 中的 viewMode 设置勾选状态
+        val mode = viewModel.viewMode.value ?: 2
+        val initialId = when(mode) {
             1 -> R.id.menu_view_raw
             2 -> R.id.menu_view_corrected
             else -> R.id.menu_view_analysis
@@ -247,19 +254,19 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         return when (item.itemId) {
             R.id.menu_view_raw -> {
                 item.isChecked = true
-                currentViewMode = 1
+                viewModel.setViewMode(1)
                 android.widget.Toast.makeText(this, "切换至：原始视图 (C1)", android.widget.Toast.LENGTH_SHORT).show()
                 true
             }
             R.id.menu_view_corrected -> {
                 item.isChecked = true
-                currentViewMode = 2
+                viewModel.setViewMode(2)
                 android.widget.Toast.makeText(this, "切换至：去畸变视图 (C2)", android.widget.Toast.LENGTH_SHORT).show()
                 true
             }
             R.id.menu_view_analysis -> {
                 item.isChecked = true
-                currentViewMode = 3
+                viewModel.setViewMode(3)
                 android.widget.Toast.makeText(this, "切换至：标准分析视图 (C3)", android.widget.Toast.LENGTH_SHORT).show()
                 true
             }
@@ -291,41 +298,35 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     }
 
     private fun captureAndProcess() {
-        Log.i("MainActivity", "开始分析按鈕被点击")
-
-        // 立即禁用按鈕，防止重复点击
-        btnCapture.isEnabled = false
-        btnCapture.text = "分析中..."
-        tvResult.text = "正在分析，请稍候..."
-        tvResult.visibility = View.VISIBLE
-
-        val bitmap = textureView.getBitmap()
-        if (bitmap == null) {
-            Log.e("MainActivity", "无法获取图像")
-            tvResult.text = "错误: 无法获取图像"
-            btnCapture.isEnabled = true
-            btnCapture.text = "开始分析"
-            return
-        }
-
-        // 在后台线程执行适宽转 + OpenCV 分析，不阻塞主线程
-        diskExecutor.execute {
-            // 2. 检查内参兼容性并根据需要弹出警告
-            val cal = currentCalibration
-            if ((cal == null || !cal.isValid()) && !warnedThisSession) {
+        val bitmap = textureView.getBitmap() ?: return
+        
+        visionRepository.analyzeImage(
+            bitmap = bitmap,
+            calibration = viewModel.currentCalibration.value,
+            viewMode = viewModel.viewMode.value ?: 2,
+            onPreAnalysis = {
                 runOnUiThread {
-                    showCompatibilityWarning { 
-                        // 用户确认后继续
-                        executeAnalysisPipeline(bitmap)
-                    }
+                    btnCapture.isEnabled = false
+                    btnCapture.text = "分析中..."
+                    tvResult.text = "正在分析，请稍候..."
+                    tvResult.visibility = View.VISIBLE
                 }
-            } else {
-                executeAnalysisPipeline(bitmap)
+            },
+            onResult = { result ->
+                runOnUiThread {
+                    lastBitmap = result.processedBitmap ?: bitmap
+                    viewModel.setLastResult(result)
+                    btnCapture.isEnabled = true
+                    btnCapture.text = "开始分析"
+                }
+            },
+            onShowWarning = { onContinue ->
+                runOnUiThread {
+                    showCompatibilityWarning(onContinue)
+                }
             }
-        }
+        )
     }
-
-    private var warnedThisSession = false
 
     private fun showCompatibilityWarning(onContinue: () -> Unit) {
         android.app.AlertDialog.Builder(this)
@@ -335,61 +336,12 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                     "⚠️ 注意：由于缺乏光学纠偏，测量直径和粗度时可能会产生 10%-15% 的误差。建议仅作为参考。")
             .setCancelable(false)
             .setPositiveButton("已阅并继续") { _, _ ->
-                warnedThisSession = true
                 onContinue()
             }
             .setNegativeButton("退出程序") { _, _ ->
                 finish()
             }
             .show()
-    }
-
-    private fun executeAnalysisPipeline(bitmap: Bitmap) {
-        diskExecutor.execute {
-            // 1. 获取预览图
-            val correctedBitmap = bitmap 
-            Log.i("MainActivity", "Captured Bitmap 尺寸: ${correctedBitmap.width}x${correctedBitmap.height}")
-
-            // 2. 运行算法
-            val t0 = System.currentTimeMillis()
-            // 传入当前选择的视图模式及标定上下文
-            val result = AlgorithmProcessor.processImage(correctedBitmap, currentCalibration, currentViewMode)
-            val elapsed = System.currentTimeMillis() - t0
-            Log.i("MainActivity", "算法总耗时: ${elapsed}ms")
-
-            // 3. 保存调试图片
-            saveDebugBitmap(correctedBitmap, "aruco_debug")
-
-            // 4. 更新 UI
-            runOnUiThread {
-                val finalDisplayBitmap = result.processedBitmap ?: correctedBitmap
-                lastBitmap = finalDisplayBitmap
-                lastSensorRotation = 0
-                
-                if (!result.success) {
-                    Log.e("MainActivity", "识别失败: ${result.error}")
-                }
-                lastResult = result
-                displayResult(result)
-                // 恢复按钮状态
-                btnCapture.isEnabled = true
-                btnCapture.text = "开始分析"
-            }
-        }
-    }
-    
-    private fun saveDebugBitmap(bitmap: Bitmap, prefix: String) {
-        try {
-            val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-            val fileName = "${prefix}_${timeStamp}.jpg"
-            val file = java.io.File(getExternalFilesDir(null), fileName)
-            java.io.FileOutputStream(file).use { out ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)
-            }
-            Log.e(TAG, "已保存分析图像至: ${file.absolutePath}")
-        } catch (e: Exception) {
-            Log.e(TAG, "保存调试图像失败: ${e.message}")
-        }
     }
 
     private fun displayResult(result: AlgorithmResult) {
@@ -459,7 +411,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             tts.speak(ttsText, TextToSpeech.QUEUE_FLUSH, null, null)
         }
         
-        if (cbAuto.isChecked) {
+        if (viewModel.isAutoCaptureEnabled.value == true) {
             val delay = if (isZero) 1000L else 5000L
             handler.removeCallbacks(autoCaptureRunnable)
             handler.postDelayed(autoCaptureRunnable, delay)
@@ -520,11 +472,9 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     }
     
     
-    private val diskExecutor = Executors.newSingleThreadExecutor()
-
     
     private fun showCameraParamsDialog() {
-        val cal = currentCalibration
+        val cal = viewModel.currentCalibration.value
         val message = if (cal != null && cal.isValid()) {
             """
             模型: ${android.os.Build.MODEL}
@@ -565,144 +515,16 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             tts.stop()
             tts.shutdown()
         }
+        visionRepository.release()
         cameraManager.release()
     }
-    /**
-     * 弹出诊断对话框，并列展示头、中、尾拉直后的对比图
-     */
-    private fun showDiagnosticDialog(result: AlgorithmResult) {
-        val strips = result.diagStrips ?: return
-        if (strips.isEmpty()) return
-        
-        val context = this
-        val dialog = android.app.AlertDialog.Builder(context, android.R.style.Theme_Material_NoActionBar_Fullscreen).create()
-        
-        val root = android.widget.LinearLayout(context).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setBackgroundColor(android.graphics.Color.BLACK)
-            setPadding(32, 64, 32, 32)
+    private fun dismissResultView() {
+        if (layoutResult.visibility == View.VISIBLE) {
+            layoutResult.visibility = View.GONE
+            overlayView.clearMarkers()
+            overlayView.visibility = View.GONE
+            Log.d(TAG, "用户点击屏幕，收起分析结果")
         }
-        
-        // 标题栏
-        val header = android.widget.RelativeLayout(context).apply {
-            layoutParams = android.widget.LinearLayout.LayoutParams(-1, -2).apply { setMargins(0, 0, 0, 48) }
-        }
-        val title = android.widget.TextView(context).apply {
-            text = "直线度深度诊断 (拉直对比图)"
-            setTextColor(android.graphics.Color.WHITE)
-            textSize = 22f
-            setTypeface(null, Typeface.BOLD)
-        }
-        val close = android.widget.Button(context).apply {
-            text = "关闭诊断"
-            setBackgroundColor(android.graphics.Color.DKGRAY)
-            setTextColor(android.graphics.Color.WHITE)
-            setOnClickListener { dialog.dismiss() }
-        }
-        header.addView(title)
-        val lpClose = android.widget.RelativeLayout.LayoutParams(-2, -2).apply { addRule(android.widget.RelativeLayout.ALIGN_PARENT_END) }
-        header.addView(close, lpClose)
-        root.addView(header)
-        
-        // 增加文本分析板块
-        val analysisScroll = android.widget.ScrollView(context).apply {
-            layoutParams = android.widget.LinearLayout.LayoutParams(-1, 0, 1f)
-        }
-        val analysisContent = android.widget.LinearLayout(context).apply {
-            orientation = android.widget.LinearLayout.VERTICAL
-            setPadding(0, 0, 0, 40)
-        }
-
-        // Section 1: 直线度分析
-        val straightnessHeader = android.widget.TextView(context).apply {
-            text = "一、直线度深度分析 (Straightness)"
-            setTextColor(android.graphics.Color.CYAN)
-            textSize = 18f
-            setTypeface(null, Typeface.BOLD)
-            setPadding(0, 20, 0, 10)
-        }
-        val straightnessText = android.widget.TextView(context).apply {
-            val overall = String.format("%.2f", result.straightnessOverall)
-            val head = String.format("%.2f", result.straightnessHead)
-            val tail = String.format("%.2f", result.straightnessTail)
-            text = "• 整体 RMSE: ${overall} mm\n• 头部 RMSE: ${head} mm\n• 尾部 RMSE: ${tail} mm"
-            setTextColor(android.graphics.Color.WHITE)
-            textSize = 15f
-            setPadding(20, 0, 0, 20)
-        }
-        analysisContent.addView(straightnessHeader)
-        analysisContent.addView(straightnessText)
-
-        // Section 2: 3D 位姿分析
-        val poseHeader = android.widget.TextView(context).apply {
-            text = "二、3D 空间位姿报告 (Pose 3D)"
-            setTextColor(android.graphics.Color.GREEN)
-            textSize = 18f
-            setTypeface(null, Typeface.BOLD)
-            setPadding(0, 20, 0, 10)
-        }
-        val poseText = android.widget.TextView(context).apply {
-            val cam = result.cameraPosWorld?.let { String.format("X:%.1f, Y:%.1f, Z:%.1f", it[0], it[1], it[2]) } ?: "未知"
-            val head3d = result.headPosWorld?.let { String.format("X:%.1f, Y:%.1f, Z:%.1f", it[0], it[1], it[2]) } ?: "未知"
-            val tail3d = result.tailPosWorld?.let { String.format("X:%.1f, Y:%.1f, Z:%.1f", it[0], it[1], it[2]) } ?: "未知"
-            
-            text = "• 相机位置: ($cam) mm\n• 芦笋头部: ($head3d) mm\n• 芦笋尾部: ($tail3d) mm\n" +
-                   "• 镜头高度: ${String.format("%.1f", result.poseDistanceMm)} mm\n" +
-                   "• 相机倾角: ${String.format("%.1f", result.tiltAngle)}°"
-            setTextColor(android.graphics.Color.WHITE)
-            textSize = 15f
-            setPadding(20, 0, 0, 30)
-        }
-        analysisContent.addView(poseHeader)
-        analysisContent.addView(poseText)
-
-        // Section 3: 图形对比
-        val stripsHeader = android.widget.TextView(context).apply {
-            text = "三、局部拉直切片对比"
-            setTextColor(android.graphics.Color.YELLOW)
-            textSize = 18f
-            setTypeface(null, Typeface.BOLD)
-            setPadding(0, 20, 0, 20)
-        }
-        analysisContent.addView(stripsHeader)
-
-        // 水平滚动容器 (原有的诊断图逻辑)
-        val imageScroll = android.widget.HorizontalScrollView(context).apply {
-            layoutParams = android.widget.LinearLayout.LayoutParams(-1, -2)
-        }
-        val imageContainer = android.widget.LinearLayout(context).apply {
-            orientation = android.widget.LinearLayout.HORIZONTAL
-        }
-        
-        val labels = listOf("头段", "整体", "尾段")
-        strips.forEachIndexed { index, bitmap ->
-            val itemWrapper = android.widget.LinearLayout(context).apply {
-                orientation = android.widget.LinearLayout.VERTICAL
-                setPadding(10, 0, 10, 0)
-                gravity = android.view.Gravity.CENTER_HORIZONTAL
-            }
-            val img = android.widget.ImageView(context).apply {
-                setImageBitmap(bitmap)
-                adjustViewBounds = true
-                layoutParams = android.widget.LinearLayout.LayoutParams(350, -2)
-            }
-            val label = android.widget.TextView(context).apply {
-                text = labels.getOrElse(index) { "区域$index" }
-                setTextColor(android.graphics.Color.GRAY)
-                textSize = 12f
-            }
-            itemWrapper.addView(img)
-            itemWrapper.addView(label)
-            imageContainer.addView(itemWrapper)
-        }
-        imageScroll.addView(imageContainer)
-        analysisContent.addView(imageScroll)
-        
-        analysisScroll.addView(analysisContent)
-        root.addView(analysisScroll)
-        
-        dialog.setContentView(root)
-        dialog.show()
     }
 
     /**
@@ -712,10 +534,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     private fun updateRealtimePose() {
         val bitmap = textureView.getBitmap() ?: return
         
-        // 使用单线程池执行，避免 UI 卡顿
-        diskExecutor.execute {
-            val result = AlgorithmProcessor.processRealtimePose(bitmap, currentCalibration)
-            
+        visionRepository.analyzeRealtimePose(bitmap, viewModel.currentCalibration.value) { result ->
             runOnUiThread {
                 if (result.success) {
                     val cam = result.cameraPosWorld
@@ -726,27 +545,24 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                         tvHUDStatus.setTextColor(android.graphics.Color.GREEN)
                     }
                     
-                    // 【关键修复】同步去畸变背景以确保对齐
-                    overlayView.setBackgroundBitmap(result.canvas2Bitmap)
+                    val displayBmp = result.canvas2Bitmap ?: bitmap
+                    overlayView.setBackgroundBitmap(displayBmp)
                     
-                    // 【核心修复】同步标记到 OverlayView
                     if (result.arucoCorners != null && result.arucoIds != null) {
                         val markers = result.arucoCorners.zip(result.arucoIds).map { (corners, id) ->
                             com.example.asparagusclassifier.ui.ArucoMarker(corners, id)
                         }
-                        // 使用当前位图的尺寸进行坐标映射
-                        overlayView.setArucoMarkers(markers, bitmap.width, bitmap.height, 0)
+                        overlayView.setArucoMarkers(markers, displayBmp.width, displayBmp.height, 0)
                     }
                     overlayView.setAxis3D(result.axis3DPoints)
                     overlayView.visibility = android.view.View.VISIBLE
-                    android.util.Log.d("MainActivity", "Realtime: UI Updated (Markers count: ${result.arucoIds?.size}, Axis: ${result.axis3DPoints?.size})")
                     
                 } else {
                     tvHUDPose.text = lastPoseWorldText
                     tvHUDStatus.text = "Status: 信号丢失 (当前为离线历史值)"
                     tvHUDStatus.setTextColor(android.graphics.Color.RED)
-                    overlayView.setBackgroundBitmap(null) // 丢失时清空背景
-                    overlayView.clearMarkers() // 清除渲染标记
+                    overlayView.setBackgroundBitmap(null)
+                    overlayView.clearMarkers()
                     overlayView.setAxis3D(null)
                 }
             }

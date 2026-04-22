@@ -8,6 +8,7 @@ import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
 import org.opencv.calib3d.Calib3d
 import android.graphics.PointF
+import com.example.asparagusclassifier.util.useMatScope
 
 /**
  * 芦笋分级处理器 (三画布架构重构版)
@@ -39,220 +40,216 @@ object AlgorithmProcessor {
             Bitmap.createScaledBitmap(bitmap, workW, workH, true)
         } else bitmap
 
-        val rgba = Mat()
-        val rgbaUndistorted = Mat()
-        val warpedRgba = Mat(AlgorithmConfig.TARGET_HEIGHT, AlgorithmConfig.TARGET_WIDTH, CvType.CV_8UC4)
-        var transMat: Mat? = null
-        var mapper: CoordinateMapper? = null
-        var poseInfo: PoseInfo? = null
+        return useMatScope { scope ->
+            val rgba = scope.createMat()
+            val rgbaUndistorted = scope.createMat()
+            val warpedRgba = scope.createMat()
+            // 为 warpedRgba 初始化尺寸和类型
+            warpedRgba.create(AlgorithmConfig.TARGET_HEIGHT, AlgorithmConfig.TARGET_WIDTH, CvType.CV_8UC4)
+            
+            var transMat: Mat? = null
+            var poseInfo: PoseInfo? = null
 
-        try {
-            Utils.bitmapToMat(workBitmap, rgba)
-            
-            // --- Step 1: 物理去畸变 (生成 Canvas 2) ---
-            if (calibration != null && calibration.isValid()) {
-                undistortImage(rgba, rgbaUndistorted, calibration, workBitmap.width, workBitmap.height)
-                Log.i(TAG, "[Step 1] 去畸变完成")
-            } else {
-                rgba.copyTo(rgbaUndistorted)
-                Log.w(TAG, "[Step 1] 跳过去畸变 (机型不兼容或校准参数缺失)")
-            }
-            
-            // --- Step 2: 在物理画布上检测 ArUco (Canvas 2 基准) ---
-            val arucoResult = arucoEngine.detectBoardMarkers(rgbaUndistorted)
-            
-            val arucoCorners = arucoResult.markerMap.values.toList()
-            val arucoIds = arucoResult.markerMap.keys.toList()
-
-            if (!arucoResult.success) {
-                Log.e(TAG, "[Step 2] ArUco 检测失败: ${arucoResult.error}")
-                val duration = System.currentTimeMillis() - startTime
-                return AlgorithmResult(false, 
-                    error = arucoResult.error, 
-                    executionTimeMs = duration,
-                    arucoCorners = arucoCorners, 
-                    arucoIds = arucoIds,
-                    canvas1Bitmap = workBitmap,
-                    canvas2Bitmap = matToBitmap(rgbaUndistorted),
-                    processedBitmap = if (viewMode == 2) matToBitmap(rgbaUndistorted) else workBitmap,
-                    viewMode = viewMode
-                )
-            }
-            Log.i(TAG, "[Step 2] ArUco 检测成功")
-
-            // --- Step 3: 透视变换 (Canvas 2 -> Canvas 3) ---
-            val pTL = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_TL]!!)
-            val pTR = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_TR]!!)
-            val pBR = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_BR]!!)
-            val pBL = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_BL]!!)
-
-            val srcPoints = MatOfPoint2f(
-                Point(pTL.x.toDouble(), pTL.y.toDouble()),
-                Point(pTR.x.toDouble(), pTR.y.toDouble()),
-                Point(pBR.x.toDouble(), pBR.y.toDouble()),
-                Point(pBL.x.toDouble(), pBL.y.toDouble())
-            )
-            val dstPoints = MatOfPoint2f(
-                AlgorithmConfig.TARGET_TL,
-                AlgorithmConfig.TARGET_TR,
-                AlgorithmConfig.TARGET_BR,
-                AlgorithmConfig.TARGET_BL
-            )
-
-            transMat = Imgproc.getPerspectiveTransform(srcPoints, dstPoints)
-            Imgproc.warpPerspective(rgbaUndistorted, warpedRgba, transMat!!, warpedRgba.size())
-            
-            mapper = CoordinateMapper(scaleFactor, transMat)
-            Log.i(TAG, "[Step 3] 透视变换完成 (Warping)")
-            
-            // --- Step 3.5: V2 位姿估算 (基于 Canvas 2) ---
-            poseInfo = if (calibration != null && calibration.isValid()) {
-                estimateCameraPose(srcPoints, calibration, workW, workH)
-            } else null
-            
-            srcPoints.release()
-            dstPoints.release()
-            // transMat 将在业务逻辑结束后由 finally 块释放
-
-            // --- Step 4: 逻辑画布分析 (Canvas 3 基准) ---
-            val visionResult = AsparagusVisionCore.analyze(
-                warpedRgba, 
-                AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
-                poseInfo
-            )
-            
-            if (!visionResult.success) {
-                Log.e(TAG, "[Step 4] 芦笋视觉分析失败: ${visionResult.error}")
-                val duration = System.currentTimeMillis() - startTime
-                return AlgorithmResult(false, 
-                    error = visionResult.error, 
-                    executionTimeMs = duration,
-                    arucoCorners = arucoCorners, 
-                    arucoIds = arucoIds,
-                    canvas1Bitmap = workBitmap,
-                    canvas2Bitmap = matToBitmap(rgbaUndistorted),
-                    canvas3Bitmap = matToBitmap(warpedRgba),
-                    processedBitmap = matToBitmap(warpedRgba),
-                    viewMode = viewMode
-                )
-            }
-            Log.i(TAG, "[Step 4] 芦笋视觉分析成功: 直径=%.1fmm, 长度=%.1fmm".format(visionResult.diameterMm, visionResult.lengthMm))
-            
-            // --- Step 4.5: 坐标同步与反向投影 ---
-            var finalArucoCorners = arucoCorners
-            var finalContour = visionResult.contourPoints
-            var finalAxis = visionResult.axisPoints
-            var finalTail = visionResult.purpleRootPoint
-            var finalDiameterLines = visionResult.diameterLines
-            var finalBaselineOverall = visionResult.baselineOverall
-            var finalBaselineHead = visionResult.baselineHead
-            var finalBaselineTail = visionResult.baselineTail
-            
-            if (viewMode == 3 && transMat != null) {
-                // 将标记点从 C2 投影到 C3 (用于标准分析视图叠加)
-                finalArucoCorners = arucoCorners.map { corners ->
-                    val srcMat = MatOfPoint2f(*corners.map { org.opencv.core.Point(it.x.toDouble(), it.y.toDouble()) }.toTypedArray())
-                    val dstMat = MatOfPoint2f()
-                    Core.perspectiveTransform(srcMat, dstMat, transMat)
-                    val transformed = dstMat.toArray().map { android.graphics.PointF(it.x.toFloat(), it.y.toFloat()) }.toTypedArray()
-                    srcMat.release()
-                    dstMat.release()
-                    transformed
+            try {
+                Utils.bitmapToMat(workBitmap, rgba)
+                
+                // --- Step 1: 物理去畸变 (生成 Canvas 2) ---
+                if (calibration != null && calibration.isValid()) {
+                    undistortImage(rgba, rgbaUndistorted, calibration, workBitmap.width, workBitmap.height)
+                    Log.i(TAG, "[Step 1] 去畸变完成")
+                } else {
+                    rgba.copyTo(rgbaUndistorted)
+                    Log.w(TAG, "[Step 1] 跳过去畸变 (机型不兼容或校准参数缺失)")
                 }
-            } else if (viewMode == 2 && mapper != null) {
-                // 反透视变换：将分析结果从 C3 投影回 C2 (用于去畸变视图叠加)
-                finalContour = visionResult.contourPoints.map { mapper.mapWarpedToWork(it) }
-                finalAxis = visionResult.axisPoints.map { mapper.mapWarpedToWork(it) }
-                finalTail = visionResult.purpleRootPoint?.let { mapper.mapWarpedToWork(it) }
-                finalDiameterLines = visionResult.diameterLines.map { line ->
-                    line.map { mapper.mapWarpedToWork(it) }
-                }
-                finalBaselineOverall = visionResult.baselineOverall?.map { mapper.mapWarpedToWork(it) }
-                finalBaselineHead = visionResult.baselineHead?.map { mapper.mapWarpedToWork(it) }
-                finalBaselineTail = visionResult.baselineTail?.map { mapper.mapWarpedToWork(it) }
-            }
+                
+                // --- Step 2: 在物理画布上检测 ArUco (Canvas 2 基准) ---
+                val arucoResult = arucoEngine.detectBoardMarkers(rgbaUndistorted)
+                
+                val arucoCorners = arucoResult.markerMap.values.toList()
+                val arucoIds = arucoResult.markerMap.keys.toList()
 
-            // --- Step 5: 结果构造 ---
-            val duration = System.currentTimeMillis() - startTime
-            val c1Bmp = workBitmap
-            val c2Bmp = matToBitmap(rgbaUndistorted)
-            val c3Bmp = matToBitmap(warpedRgba)
-            
-            // 根据当前选择的视图确定返回的 processedBitmap
-            val displayBitmap = when(viewMode) {
-                1 -> c1Bmp
-                2 -> c2Bmp
-                else -> c3Bmp
-            }
-
-            Log.i(TAG, "<<< 管道执行完毕，总耗时: ${duration}ms >>>")
-
-            return AlgorithmResult(
-                success = true,
-                grade = visionResult.grade,
-                diameter = visionResult.diameterMm,
-                rawDiameter = visionResult.rawDiameterMm,
-                length = visionResult.lengthMm,
-                executionTimeMs = duration,
-                straightnessOverall = visionResult.straightnessOverall,
-                straightnessHead = visionResult.straightnessHead,
-                straightnessTail = visionResult.straightnessTail,
-                baselineOverall = finalBaselineOverall,
-                baselineHead = finalBaselineHead,
-                baselineTail = finalBaselineTail,
-                
-                // 生成诊断条图
-                diagStrips = generateDiagnosticStrips(warpedRgba, visionResult),
-                
-                // 坐标返回：根据视图模式已同步
-                asparagusContour = finalContour,
-                axisPath = finalAxis,
-                tailPoint = finalTail,
-                diameterLine = finalDiameterLines,
-                asparagusRect = calculateBoundingRect(finalContour),
-                
-                arucoCorners = finalArucoCorners,
-                arucoIds = arucoIds,
-                
-                canvas1Bitmap = c1Bmp,
-                canvas2Bitmap = c2Bmp,
-                canvas3Bitmap = c3Bmp,
-                processedBitmap = displayBitmap,
-                viewMode = viewMode,
-                
-                // 3D 位姿数据
-                poseDistanceMm = poseInfo?.distanceMm ?: 0.0,
-                tiltAngle = poseInfo?.tiltAngleDeg ?: 0.0,
-                cameraPosWorld = poseInfo?.cameraPosWorld,
-                axis3DPoints = poseInfo?.let { projectAxes(it) },
-                
-                // 芦笋头尾 3D 坐标 (假设 Z=8mm)
-                headPosWorld = visionResult.axisPoints.firstOrNull()?.let {
-                    doubleArrayOf(
-                        (it.x - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
-                        (it.y - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
-                        8.0
-                    )
-                },
-                tailPosWorld = visionResult.axisPoints.lastOrNull()?.let {
-                    doubleArrayOf(
-                        (it.x - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
-                        (it.y - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
-                        8.0
+                if (!arucoResult.success) {
+                    Log.e(TAG, "[Step 2] ArUco 检测失败: ${arucoResult.error}")
+                    val duration = System.currentTimeMillis() - startTime
+                    return@useMatScope AlgorithmResult(false, 
+                        error = arucoResult.error, 
+                        executionTimeMs = duration,
+                        arucoCorners = arucoCorners, 
+                        arucoIds = arucoIds,
+                        canvas1Bitmap = workBitmap,
+                        canvas2Bitmap = matToBitmap(rgbaUndistorted),
+                        processedBitmap = if (viewMode == 2) matToBitmap(rgbaUndistorted) else workBitmap,
+                        viewMode = viewMode
                     )
                 }
-            )
+                Log.i(TAG, "[Step 2] ArUco 检测成功")
 
-        } catch (e: Exception) {
-            Log.e(TAG, "算法异常: ${e.message}")
-            return AlgorithmResult(false, error = e.message)
-        } finally {
-            rgba.release()
-            rgbaUndistorted.release()
-            warpedRgba.release()
-            transMat?.release()
-            mapper?.release()
-            poseInfo?.release()
+                // --- Step 3: 透视变换 (Canvas 2 -> Canvas 3) ---
+                val pTL = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_TL]!!)
+                val pTR = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_TR]!!)
+                val pBR = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_BR]!!)
+                val pBL = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_BL]!!)
+
+                val srcPoints = scope.manage(MatOfPoint2f(
+                    Point(pTL.x.toDouble(), pTL.y.toDouble()),
+                    Point(pTR.x.toDouble(), pTR.y.toDouble()),
+                    Point(pBR.x.toDouble(), pBR.y.toDouble()),
+                    Point(pBL.x.toDouble(), pBL.y.toDouble())
+                ))
+                val dstPoints = scope.manage(MatOfPoint2f(
+                    AlgorithmConfig.TARGET_TL,
+                    AlgorithmConfig.TARGET_TR,
+                    AlgorithmConfig.TARGET_BR,
+                    AlgorithmConfig.TARGET_BL
+                ))
+
+                transMat = scope.manage(Imgproc.getPerspectiveTransform(srcPoints, dstPoints))
+                Imgproc.warpPerspective(rgbaUndistorted, warpedRgba, transMat!!, warpedRgba.size())
+                
+                val mapper = CoordinateMapper(scaleFactor, transMat)
+                Log.i(TAG, "[Step 3] 透视变换完成 (Warping)")
+                
+                // --- Step 3.5: V2 位姿估算 (基于 Canvas 2) ---
+                poseInfo = if (calibration != null && calibration.isValid()) {
+                    estimateCameraPose(srcPoints as MatOfPoint2f, calibration, workW, workH)
+                } else null
+                
+                // 自动释放将由 useMatScope 处理，但 poseInfo 内部的 Mat 需要单独管理
+                poseInfo?.let { scope.manage(it.rvec); scope.manage(it.tvec); scope.manage(it.cameraMatrix) }
+
+                // --- Step 4: 逻辑画布分析 (Canvas 3 基准) ---
+                val visionResult = AsparagusVisionCore.analyze(
+                    warpedRgba, 
+                    AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
+                    poseInfo
+                )
+                
+                if (!visionResult.success) {
+                    Log.e(TAG, "[Step 4] 芦笋视觉分析失败: ${visionResult.error}")
+                    val duration = System.currentTimeMillis() - startTime
+                    return@useMatScope AlgorithmResult(false, 
+                        error = visionResult.error, 
+                        executionTimeMs = duration,
+                        arucoCorners = arucoCorners, 
+                        arucoIds = arucoIds,
+                        canvas1Bitmap = workBitmap,
+                        canvas2Bitmap = matToBitmap(rgbaUndistorted),
+                        canvas3Bitmap = matToBitmap(warpedRgba),
+                        processedBitmap = matToBitmap(warpedRgba),
+                        viewMode = viewMode
+                    )
+                }
+                Log.i(TAG, "[Step 4] 芦笋视觉分析成功: 直径=%.1fmm, 长度=%.1fmm".format(visionResult.diameterMm, visionResult.lengthMm))
+                
+                // --- Step 4.5: 坐标同步与反向投影 ---
+                var finalArucoCorners = arucoCorners
+                var finalContour = visionResult.contourPoints
+                var finalAxis = visionResult.axisPoints
+                var finalTail = visionResult.purpleRootPoint
+                var finalDiameterLines = visionResult.diameterLines
+                var finalBaselineOverall = visionResult.baselineOverall
+                var finalBaselineHead = visionResult.baselineHead
+                var finalBaselineTail = visionResult.baselineTail
+                
+                if (viewMode == 3 && transMat != null) {
+                    // 将标记点从 C2 投影到 C3 (用于标准分析视图叠加)
+                    finalArucoCorners = arucoCorners.map { corners ->
+                        val srcMat = MatOfPoint2f(*corners.map { org.opencv.core.Point(it.x.toDouble(), it.y.toDouble()) }.toTypedArray())
+                        val dstMat = MatOfPoint2f()
+                        Core.perspectiveTransform(srcMat, dstMat, transMat)
+                        val transformed = dstMat.toArray().map { android.graphics.PointF(it.x.toFloat(), it.y.toFloat()) }.toTypedArray()
+                        srcMat.release()
+                        dstMat.release()
+                        transformed
+                    }
+                } else if (viewMode == 2 && mapper != null) {
+                    // 反透视变换：将分析结果从 C3 投影回 C2 (用于去畸变视图叠加)
+                    finalContour = visionResult.contourPoints.map { mapper.mapWarpedToWork(it) }
+                    finalAxis = visionResult.axisPoints.map { mapper.mapWarpedToWork(it) }
+                    finalTail = visionResult.purpleRootPoint?.let { mapper.mapWarpedToWork(it) }
+                    finalDiameterLines = visionResult.diameterLines.map { line ->
+                        line.map { mapper.mapWarpedToWork(it) }
+                    }
+                    finalBaselineOverall = visionResult.baselineOverall?.map { mapper.mapWarpedToWork(it) }
+                    finalBaselineHead = visionResult.baselineHead?.map { mapper.mapWarpedToWork(it) }
+                    finalBaselineTail = visionResult.baselineTail?.map { mapper.mapWarpedToWork(it) }
+                }
+
+                // --- Step 5: 结果构造 ---
+                val duration = System.currentTimeMillis() - startTime
+                val c1Bmp = workBitmap
+                val c2Bmp = matToBitmap(rgbaUndistorted)
+                val c3Bmp = matToBitmap(warpedRgba)
+                
+                // 根据当前选择的视图确定返回的 processedBitmap
+                val displayBitmap = when(viewMode) {
+                    1 -> c1Bmp
+                    2 -> c2Bmp
+                    else -> c3Bmp
+                }
+
+                Log.i(TAG, "<<< 管道执行完毕，总耗时: ${duration}ms >>>")
+
+                return@useMatScope AlgorithmResult(
+                    success = true,
+                    grade = visionResult.grade,
+                    diameter = visionResult.diameterMm,
+                    rawDiameter = visionResult.rawDiameterMm,
+                    length = visionResult.lengthMm,
+                    executionTimeMs = duration,
+                    straightnessOverall = visionResult.straightnessOverall,
+                    straightnessHead = visionResult.straightnessHead,
+                    straightnessTail = visionResult.straightnessTail,
+                    baselineOverall = finalBaselineOverall,
+                    baselineHead = finalBaselineHead,
+                    baselineTail = finalBaselineTail,
+                    
+                    // 生成诊断条图
+                    diagStrips = generateDiagnosticStrips(warpedRgba, visionResult),
+                    
+                    // 坐标返回：根据视图模式已同步
+                    asparagusContour = finalContour,
+                    axisPath = finalAxis,
+                    tailPoint = finalTail,
+                    diameterLine = finalDiameterLines,
+                    asparagusRect = calculateBoundingRect(finalContour),
+                    
+                    arucoCorners = finalArucoCorners,
+                    arucoIds = arucoIds,
+                    
+                    canvas1Bitmap = c1Bmp,
+                    canvas2Bitmap = c2Bmp,
+                    canvas3Bitmap = c3Bmp,
+                    processedBitmap = displayBitmap,
+                    viewMode = viewMode,
+                    
+                    // 3D 位姿数据
+                    poseDistanceMm = poseInfo?.distanceMm ?: 0.0,
+                    tiltAngle = poseInfo?.tiltAngleDeg ?: 0.0,
+                    cameraPosWorld = poseInfo?.cameraPosWorld,
+                    axis3DPoints = poseInfo?.let { projectAxes(it) },
+                    
+                    // 芦笋头尾 3D 坐标 (假设 Z=8mm)
+                    headPosWorld = visionResult.axisPoints.firstOrNull()?.let {
+                        doubleArrayOf(
+                            (it.x - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
+                            (it.y - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
+                            8.0
+                        )
+                    },
+                    tailPosWorld = visionResult.axisPoints.lastOrNull()?.let {
+                        doubleArrayOf(
+                            (it.x - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
+                            (it.y - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
+                            8.0
+                        )
+                    }
+                )
+
+            } catch (e: Exception) {
+                Log.e(TAG, "算法异常: ${e.message}")
+                return@useMatScope AlgorithmResult(false, error = e.message)
+            }
         }
     }
     
@@ -274,63 +271,65 @@ object AlgorithmProcessor {
             Bitmap.createScaledBitmap(bitmap, workW, workH, true)
         } else bitmap
 
-        val rgba = Mat()
-        val rgbaUndistorted = Mat()
-        var poseInfo: PoseInfo? = null
-        
-        try {
-            Utils.bitmapToMat(workBitmap, rgba)
+        return useMatScope { scope ->
+            val rgba = scope.createMat()
+            val rgbaUndistorted = scope.createMat()
+            var poseInfo: PoseInfo? = null
             
-            // 1. 去畸变 (使用缩放后的尺寸)
-            if (calibration != null && calibration.isValid()) {
-                undistortImage(rgba, rgbaUndistorted, calibration, workW, workH)
-            } else {
-                rgba.copyTo(rgbaUndistorted)
-            }
-            
-            // 2. 检测标记
-            val arucoResult = arucoEngine.detectBoardMarkers(rgbaUndistorted)
-            if (!arucoResult.success) {
-                Log.d(TAG, "RealtimePose: ArUco Lost")
-                return AlgorithmResult(false, error = "Aruco Lost (${workW}x${workH})")
-            }
-            Log.d(TAG, "RealtimePose: ArUco Detected, ID=${arucoResult.markerMap.keys}")
-            
-            // 3. 解算位姿
-            val pTL = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_TL]!!)
-            val pTR = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_TR]!!)
-            val pBR = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_BR]!!)
-            val pBL = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_BL]!!)
+            try {
+                Utils.bitmapToMat(workBitmap, rgba)
+                
+                // 1. 去畸变 (使用缩放后的尺寸)
+                if (calibration != null && calibration.isValid()) {
+                    undistortImage(rgba, rgbaUndistorted, calibration, workW, workH)
+                } else {
+                    rgba.copyTo(rgbaUndistorted)
+                }
+                
+                // 2. 检测标记
+                val arucoResult = arucoEngine.detectBoardMarkers(rgbaUndistorted)
+                if (!arucoResult.success) {
+                    Log.d(TAG, "RealtimePose: ArUco Lost")
+                    return@useMatScope AlgorithmResult(false, error = "Aruco Lost (${workW}x${workH})")
+                }
+                Log.d(TAG, "RealtimePose: ArUco Detected, ID=${arucoResult.markerMap.keys}")
+                
+                // 3. 解算位姿
+                val pTL = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_TL]!!)
+                val pTR = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_TR]!!)
+                val pBR = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_BR]!!)
+                val pBL = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_BL]!!)
 
-            val imagePoints = MatOfPoint2f(
-                Point(pTL.x.toDouble(), pTL.y.toDouble()),
-                Point(pTR.x.toDouble(), pTR.y.toDouble()),
-                Point(pBR.x.toDouble(), pBR.y.toDouble()),
-                Point(pBL.x.toDouble(), pBL.y.toDouble())
-            )
-            
-            poseInfo = if (calibration != null && calibration.isValid()) {
-                estimateCameraPose(imagePoints, calibration, workW, workH)
-            } else null
-            
-            imagePoints.release()
-            
-            return AlgorithmResult(
-                success = true,
-                arucoCorners = arucoResult.markerMap.values.toList(),
-                arucoIds = arucoResult.markerMap.keys.toList(),
-                poseDistanceMm = poseInfo?.distanceMm ?: 0.0,
-                tiltAngle = poseInfo?.tiltAngleDeg ?: 0.0,
-                cameraPosWorld = poseInfo?.cameraPosWorld,
-                axis3DPoints = poseInfo?.let { projectAxes(it) },
-                viewMode = 2
-            )
-        } catch (e: Exception) {
-            return AlgorithmResult(false, error = e.message)
-        } finally {
-            rgba.release()
-            rgbaUndistorted.release()
-            poseInfo?.release()
+                val imagePoints = scope.manage(MatOfPoint2f(
+                    Point(pTL.x.toDouble(), pTL.y.toDouble()),
+                    Point(pTR.x.toDouble(), pTR.y.toDouble()),
+                    Point(pBR.x.toDouble(), pBR.y.toDouble()),
+                    Point(pBL.x.toDouble(), pBL.y.toDouble())
+                ))
+                
+                poseInfo = if (calibration != null && calibration.isValid()) {
+                    estimateCameraPose(imagePoints as MatOfPoint2f, calibration, workW, workH)
+                } else null
+                
+                poseInfo?.let { scope.manage(it.rvec); scope.manage(it.tvec); scope.manage(it.cameraMatrix) }
+                
+                val c2Bmp = matToBitmap(rgbaUndistorted)
+                
+                return@useMatScope AlgorithmResult(
+                    success = true,
+                    arucoCorners = arucoResult.markerMap.values.toList(),
+                    arucoIds = arucoResult.markerMap.keys.toList(),
+                    poseDistanceMm = poseInfo?.distanceMm ?: 0.0,
+                    tiltAngle = poseInfo?.tiltAngleDeg ?: 0.0,
+                    cameraPosWorld = poseInfo?.cameraPosWorld,
+                    axis3DPoints = poseInfo?.let { projectAxes(it) },
+                    canvas2Bitmap = c2Bmp,
+                    processedBitmap = c2Bmp,
+                    viewMode = 2
+                )
+            } catch (e: Exception) {
+                return@useMatScope AlgorithmResult(false, error = e.message)
+            }
         }
     }
 
