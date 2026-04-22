@@ -1,15 +1,24 @@
 package com.example.asparagusclassifier
 
+import android.graphics.Bitmap
 import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import android.util.Log
 import com.example.asparagusclassifier.algorithm.AlgorithmResult
 import com.example.asparagusclassifier.algorithm.CalibrationData
+import com.example.asparagusclassifier.data.VisionRepository
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.launch
 
 /**
- * MainActivity 的状态管理器
+ * MainActivity 的状态管理器 (重构版)
+ * 负责调度业务流、管理分析状态与并发任务
  */
-class MainViewModel : ViewModel() {
+class MainViewModel(private val visionRepository: VisionRepository) : ViewModel() {
+    private val TAG = "MainViewModel"
 
     // 视图模式 (1: Raw, 2: Corrected, 3: Analysis)
     private val _viewMode = MutableLiveData(2)
@@ -31,18 +40,22 @@ class MainViewModel : ViewModel() {
     private val _isAutoCaptureEnabled = MutableLiveData(false)
     val isAutoCaptureEnabled: LiveData<Boolean> = _isAutoCaptureEnabled
 
-    // 抓拍请求事件 (通过时间戳触发)
+    // 抓拍请求事件
     private val _captureRequest = MutableLiveData<Long>()
     val captureRequest: LiveData<Long> = _captureRequest
+
+    // 分析状态
+    private val _isAnalyzing = MutableLiveData(false)
+    val isAnalyzing: LiveData<Boolean> = _isAnalyzing
+
+    // 兼容性警告信号
+    private val _showWarningEvent = Channel<Unit>()
+    val showWarningEvent = _showWarningEvent.receiveAsFlow()
 
     fun setViewMode(mode: Int) {
         if (_viewMode.value != mode) {
             _viewMode.value = mode
         }
-    }
-
-    fun setLastResult(result: AlgorithmResult?) {
-        _lastResult.value = result
     }
 
     fun setCurrentCalibration(calibration: CalibrationData?) {
@@ -63,5 +76,49 @@ class MainViewModel : ViewModel() {
 
     fun requestCapture() {
         _captureRequest.value = System.currentTimeMillis()
+    }
+
+    /**
+     * 执行全流程分析
+     */
+    fun analyzeImage(bitmap: Bitmap) {
+        if (_isAnalyzing.value == true) return
+        
+        viewModelScope.launch {
+            _isAnalyzing.value = true
+            
+            try {
+                val result = visionRepository.analyzeImage(
+                    bitmap = bitmap,
+                    calibration = _currentCalibration.value,
+                    viewMode = _viewMode.value ?: 3,
+                    onShowWarning = {
+                        // 显式调用挂起函数
+                        _showWarningEvent.send(Unit)
+                    }
+                )
+                _lastResult.value = result
+            } catch (e: Exception) {
+                Log.e(TAG, "分析启动失败: ${e.message}")
+            } finally {
+                _isAnalyzing.value = false
+            }
+        }
+    }
+
+    /**
+     * 执行实时位姿解算
+     */
+    fun analyzeRealtimePose(bitmap: Bitmap, onResult: (AlgorithmResult) -> Unit) {
+        // 使用显式作用域启动
+        this.viewModelScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            try {
+                // 确保在挂起环境中调用
+                val result = visionRepository.analyzeRealtimePose(bitmap, _currentCalibration.value)
+                onResult(result)
+            } catch (e: Exception) {
+                Log.e(TAG, "实时分析失败: ${e.message}")
+            }
+        }
     }
 }

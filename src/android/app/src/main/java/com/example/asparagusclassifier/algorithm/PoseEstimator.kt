@@ -228,4 +228,36 @@ object PoseEstimator {
         camMatrix.put(1, 2, cy)
         return camMatrix
     }
+
+    /**
+     * 将 Canvas 3 坐标映射到世界 3D 坐标
+     * Canvas 3 是 Z=0 平面的透视映射
+     */
+    fun mapCanvas3ToWorld3D(p: android.graphics.PointF, z: Double): Point3 {
+        val xWorld = (p.x - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3
+        val yWorld = (p.y - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3
+        return Point3(xWorld, yWorld, z)
+    }
+
+    /**
+     * 世界坐标 -> 相机坐标系
+     * Pc = R * Pw + t
+     */
+    fun transformWorldToCamera(pw: Point3, poseInfo: PoseInfo): Point3 {
+        val rMat = Mat()
+        Calib3d.Rodrigues(poseInfo.rvec, rMat)
+        
+        val rData = DoubleArray(9)
+        rMat.get(0, 0, rData)
+        
+        val tData = DoubleArray(3)
+        poseInfo.tvec.get(0, 0, tData)
+        
+        val xc = rData[0] * pw.x + rData[1] * pw.y + rData[2] * pw.z + tData[0]
+        val yc = rData[3] * pw.x + rData[4] * pw.y + rData[5] * pw.z + tData[1]
+        val zc = rData[6] * pw.x + rData[7] * pw.y + rData[8] * pw.z + tData[2]
+        
+        rMat.release()
+        return Point3(xc, yc, zc)
+    }
 }

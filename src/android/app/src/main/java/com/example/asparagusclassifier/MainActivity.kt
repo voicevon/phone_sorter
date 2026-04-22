@@ -41,7 +41,10 @@ import android.text.style.StyleSpan
 import android.graphics.Typeface
 import java.util.Locale
 import java.util.concurrent.Executors
-import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.*
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
+import com.example.asparagusclassifier.algorithm.*
 import com.example.asparagusclassifier.ui.DiagnosticDialog
 import com.example.asparagusclassifier.data.VisionRepository
 
@@ -114,8 +117,16 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         
         setContentView(R.layout.activity_main)
 
-        viewModel = ViewModelProvider(this).get(MainViewModel::class.java)
         visionRepository = VisionRepository(this)
+        
+        // 使用自定义 Factory 初始化 ViewModel
+        val factory = object : androidx.lifecycle.ViewModelProvider.Factory {
+            override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
+                return MainViewModel(visionRepository) as T
+            }
+        }
+        viewModel = androidx.lifecycle.ViewModelProvider(this, factory).get(MainViewModel::class.java)
+        
         setupObservers()
         
         textureView = findViewById(R.id.textureView)
@@ -192,10 +203,6 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     }
     
     private fun setupObservers() {
-        viewModel.viewMode.observe(this) { mode ->
-            // 这里可以处理一些模式切换时的即时 UI 刷新
-        }
-        
         viewModel.lastResult.observe(this) { result ->
             result?.let { displayResult(it) }
         }
@@ -210,6 +217,26 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         viewModel.captureRequest.observe(this) {
             captureAndProcess()
         }
+        
+        // 观察分析状态更新 UI
+        viewModel.isAnalyzing.observe(this) { isAnalyzing ->
+            if (isAnalyzing) {
+                btnCapture.isEnabled = false
+                btnCapture.text = "分析中..."
+                tvResult.text = "正在分析，请稍候..."
+                tvResult.visibility = View.VISIBLE
+            } else {
+                btnCapture.isEnabled = true
+                btnCapture.text = "开始分析"
+            }
+        }
+        
+        // 收集警告事件流
+        lifecycleScope.launchWhenStarted {
+            viewModel.showWarningEvent.collect {
+                showCompatibilityWarning()
+            }
+        }
     }
 
     override fun onSizeInfoReceived(cameraWidth: Int, cameraHeight: Int, cameraRatio: Float,
@@ -221,7 +248,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             tvResult.text = text
             tvResult.visibility = View.VISIBLE
             
-            overlayView.setDisplayRect(0f, 0f, previewWidth.toFloat(), previewHeight.toFloat())
+            overlayView.setDisplayRect()
             
             // 更新 ViewModel 中的标定数据
             viewModel.setCurrentCalibration(calibration)
@@ -301,45 +328,17 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
 
     private fun captureAndProcess() {
         val bitmap = textureView.getBitmap() ?: return
-        
-        visionRepository.analyzeImage(
-            bitmap = bitmap,
-            calibration = viewModel.currentCalibration.value,
-            viewMode = viewModel.viewMode.value ?: 2,
-            onPreAnalysis = {
-                runOnUiThread {
-                    btnCapture.isEnabled = false
-                    btnCapture.text = "分析中..."
-                    tvResult.text = "正在分析，请稍候..."
-                    tvResult.visibility = View.VISIBLE
-                }
-            },
-            onResult = { result ->
-                runOnUiThread {
-                    lastBitmap = result.processedBitmap ?: bitmap
-                    viewModel.setLastResult(result)
-                    btnCapture.isEnabled = true
-                    btnCapture.text = "开始分析"
-                }
-            },
-            onShowWarning = { onContinue ->
-                runOnUiThread {
-                    showCompatibilityWarning(onContinue)
-                }
-            }
-        )
+        viewModel.analyzeImage(bitmap)
     }
 
-    private fun showCompatibilityWarning(onContinue: () -> Unit) {
+    private fun showCompatibilityWarning() {
         android.app.AlertDialog.Builder(this)
             .setTitle("机型兼容性提示")
             .setMessage("检测到非标设备（当前型号: ${android.os.Build.MODEL}）。\n\n" +
                     "由于硬件驱动限制，无法读取相机校准参数。系统已自动切换至“原始兼容模式”。\n\n" +
                     "⚠️ 注意：由于缺乏光学纠偏，测量直径和粗度时可能会产生 10%-15% 的误差。建议仅作为参考。")
             .setCancelable(false)
-            .setPositiveButton("已阅并继续") { _, _ ->
-                onContinue()
-            }
+            .setPositiveButton("已阅并继续", null)
             .setNegativeButton("退出程序") { _, _ ->
                 finish()
             }
@@ -532,7 +531,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     private fun updateRealtimePose() {
         val bitmap = textureView.getBitmap() ?: return
         
-        visionRepository.analyzeRealtimePose(bitmap, viewModel.currentCalibration.value) { result ->
+        viewModel.analyzeRealtimePose(bitmap) { result ->
             runOnUiThread {
                 if (result.success) {
                     val cam = result.cameraPosWorld
