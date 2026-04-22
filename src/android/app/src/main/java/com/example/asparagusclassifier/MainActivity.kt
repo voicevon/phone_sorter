@@ -5,7 +5,12 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.os.Bundle
 import android.view.TextureView
+import android.graphics.Matrix
+import android.text.*
+import android.text.style.*
+import android.graphics.Color
 import android.view.View
+import android.view.Surface
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.TextView
@@ -47,11 +52,26 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     private lateinit var tvResult: TextView
     private lateinit var layoutResult: View
     private lateinit var btnCloseResult: android.widget.ImageButton
+    private lateinit var tvHUDPose: TextView
+    private lateinit var tvHUDStatus: TextView
     private lateinit var tts: TextToSpeech
     
     private var currentViewMode = 2 // 1: Raw, 2: Corrected, 3: Analysis
     private var currentCalibration: com.example.asparagusclassifier.algorithm.CalibrationData? = null
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var lastPoseWorldText: CharSequence = "Cam Pos (World):\nX:--  Y:--  Z:--"
+    
+    private var isRealtimePoseActive = true
+    private val realtimePoseHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val realtimePoseRunnable = object : java.lang.Runnable {
+        override fun run() {
+            if (isRealtimePoseActive) {
+                updateRealtimePose()
+            }
+            realtimePoseHandler.postDelayed(this, 300) // 约 3 FPS，平衡性能与发热
+        }
+    }
+
     private val autoCaptureRunnable = object : java.lang.Runnable {
         override fun run() {
             if (cbAuto.isChecked) {
@@ -103,6 +123,8 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         tvResult = findViewById(R.id.tvResult)
         layoutResult = findViewById(R.id.layoutResult)
         btnCloseResult = findViewById(R.id.btnCloseResult)
+        tvHUDPose = findViewById(R.id.tvHUDPose)
+        tvHUDStatus = findViewById(R.id.tvHUDStatus)
         
         btnCloseResult.setOnClickListener {
             dismissResultView()
@@ -139,11 +161,15 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         super.onResume()
         Log.i(TAG, "Activity Resumed, 尝试恢复相机")
         checkCameraPermission()
+        isRealtimePoseActive = true
+        realtimePoseHandler.post(realtimePoseRunnable)
     }
 
     override fun onStop() {
         super.onStop()
         Log.i(TAG, "Activity Stopped, 释放相机资源")
+        isRealtimePoseActive = false
+        realtimePoseHandler.removeCallbacks(realtimePoseRunnable)
         cameraManager.release()
     }
     
@@ -442,6 +468,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
 
     private fun updateOverlay(result: AlgorithmResult) {
         overlayView.clearMarkers()
+        overlayView.setAxis3D(result.axis3DPoints)
         
         if (lastBitmap == null) return
 
@@ -577,52 +604,171 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         header.addView(close, lpClose)
         root.addView(header)
         
-        // 水平滚动容器
-        val scroll = android.widget.HorizontalScrollView(context).apply {
-            layoutParams = android.widget.LinearLayout.LayoutParams(-1, -1)
-            isFillViewport = true
+        // 增加文本分析板块
+        val analysisScroll = android.widget.ScrollView(context).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(-1, 0, 1f)
         }
-        val container = android.widget.LinearLayout(context).apply {
+        val analysisContent = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(0, 0, 0, 40)
+        }
+
+        // Section 1: 直线度分析
+        val straightnessHeader = android.widget.TextView(context).apply {
+            text = "一、直线度深度分析 (Straightness)"
+            setTextColor(android.graphics.Color.CYAN)
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 20, 0, 10)
+        }
+        val straightnessText = android.widget.TextView(context).apply {
+            val overall = String.format("%.2f", result.straightnessOverall)
+            val head = String.format("%.2f", result.straightnessHead)
+            val tail = String.format("%.2f", result.straightnessTail)
+            text = "• 整体 RMSE: ${overall} mm\n• 头部 RMSE: ${head} mm\n• 尾部 RMSE: ${tail} mm"
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 15f
+            setPadding(20, 0, 0, 20)
+        }
+        analysisContent.addView(straightnessHeader)
+        analysisContent.addView(straightnessText)
+
+        // Section 2: 3D 位姿分析
+        val poseHeader = android.widget.TextView(context).apply {
+            text = "二、3D 空间位姿报告 (Pose 3D)"
+            setTextColor(android.graphics.Color.GREEN)
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 20, 0, 10)
+        }
+        val poseText = android.widget.TextView(context).apply {
+            val cam = result.cameraPosWorld?.let { String.format("X:%.1f, Y:%.1f, Z:%.1f", it[0], it[1], it[2]) } ?: "未知"
+            val head3d = result.headPosWorld?.let { String.format("X:%.1f, Y:%.1f, Z:%.1f", it[0], it[1], it[2]) } ?: "未知"
+            val tail3d = result.tailPosWorld?.let { String.format("X:%.1f, Y:%.1f, Z:%.1f", it[0], it[1], it[2]) } ?: "未知"
+            
+            text = "• 相机位置: ($cam) mm\n• 芦笋头部: ($head3d) mm\n• 芦笋尾部: ($tail3d) mm\n" +
+                   "• 镜头高度: ${String.format("%.1f", result.poseDistanceMm)} mm\n" +
+                   "• 相机倾角: ${String.format("%.1f", result.tiltAngle)}°"
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 15f
+            setPadding(20, 0, 0, 30)
+        }
+        analysisContent.addView(poseHeader)
+        analysisContent.addView(poseText)
+
+        // Section 3: 图形对比
+        val stripsHeader = android.widget.TextView(context).apply {
+            text = "三、局部拉直切片对比"
+            setTextColor(android.graphics.Color.YELLOW)
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 20, 0, 20)
+        }
+        analysisContent.addView(stripsHeader)
+
+        // 水平滚动容器 (原有的诊断图逻辑)
+        val imageScroll = android.widget.HorizontalScrollView(context).apply {
+            layoutParams = android.widget.LinearLayout.LayoutParams(-1, -2)
+        }
+        val imageContainer = android.widget.LinearLayout(context).apply {
             orientation = android.widget.LinearLayout.HORIZONTAL
-            gravity = android.view.Gravity.CENTER
         }
         
-        val labels = listOf("头段 (首25%)", "整体区域分析", "尾段 (末25%)")
+        val labels = listOf("头段", "整体", "尾段")
         strips.forEachIndexed { index, bitmap ->
             val itemWrapper = android.widget.LinearLayout(context).apply {
                 orientation = android.widget.LinearLayout.VERTICAL
-                setPadding(24, 0, 24, 0)
+                setPadding(10, 0, 10, 0)
                 gravity = android.view.Gravity.CENTER_HORIZONTAL
             }
-            
-            val labelText = android.widget.TextView(context).apply {
-                text = labels.getOrElse(index) { "区域$index" }
-                setTextColor(android.graphics.Color.YELLOW)
-                textSize = 16f
-                setPadding(0, 0, 0, 24)
-            }
-            
             val img = android.widget.ImageView(context).apply {
                 setImageBitmap(bitmap)
                 adjustViewBounds = true
-                scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
-                layoutParams = android.widget.LinearLayout.LayoutParams(-2, -1).apply { 
-                    weight = 1f
-                    setMargins(0, 0, 0, 40)
-                }
-                setBackgroundColor(android.graphics.Color.parseColor("#222222"))
-                setPadding(2, 2, 2, 2)
+                layoutParams = android.widget.LinearLayout.LayoutParams(350, -2)
             }
-            
-            itemWrapper.addView(labelText)
+            val label = android.widget.TextView(context).apply {
+                text = labels.getOrElse(index) { "区域$index" }
+                setTextColor(android.graphics.Color.GRAY)
+                textSize = 12f
+            }
             itemWrapper.addView(img)
-            container.addView(itemWrapper)
+            itemWrapper.addView(label)
+            imageContainer.addView(itemWrapper)
         }
+        imageScroll.addView(imageContainer)
+        analysisContent.addView(imageScroll)
         
-        scroll.addView(container)
-        root.addView(scroll)
+        analysisScroll.addView(analysisContent)
+        root.addView(analysisScroll)
         
-        dialog.setView(root)
+        dialog.setContentView(root)
         dialog.show()
     }
-}
+
+    /**
+     * 实时位姿更新函数：
+     * 从 TextureView 获取当前帧并调用实时优化版算法
+     */
+    private fun updateRealtimePose() {
+        val bitmap = textureView.getBitmap() ?: return
+        
+        // 使用单线程池执行，避免 UI 卡顿
+        diskExecutor.execute {
+            val result = AlgorithmProcessor.processRealtimePose(bitmap, currentCalibration)
+            
+            runOnUiThread {
+                if (result.success) {
+                    val cam = result.cameraPosWorld
+                    if (cam != null) {
+                        setColoredPoseText(tvHUDPose, cam[0], cam[1], Math.abs(cam[2]), "Cam Pos (World):")
+                        lastPoseWorldText = tvHUDPose.text
+                        tvHUDStatus.text = "Status: 已对准 (实时解算), 倾角:%.1f°".format(result.tiltAngle)
+                        tvHUDStatus.setTextColor(android.graphics.Color.GREEN)
+                    }
+                    
+                    // 【关键修复】同步去畸变背景以确保对齐
+                    overlayView.setBackgroundBitmap(result.canvas2Bitmap)
+                    
+                    // 【核心修复】同步标记到 OverlayView
+                    if (result.arucoCorners != null && result.arucoIds != null) {
+                        val markers = result.arucoCorners.zip(result.arucoIds).map { (corners, id) ->
+                            com.example.asparagusclassifier.ui.ArucoMarker(corners, id)
+                        }
+                        // 使用当前位图的尺寸进行坐标映射
+                        overlayView.setArucoMarkers(markers, bitmap.width, bitmap.height, 0)
+                    }
+                    overlayView.setAxis3D(result.axis3DPoints)
+                    overlayView.visibility = android.view.View.VISIBLE
+                    android.util.Log.d("MainActivity", "Realtime: UI Updated (Markers count: ${result.arucoIds?.size}, Axis: ${result.axis3DPoints?.size})")
+                    
+                } else {
+                    tvHUDPose.text = lastPoseWorldText
+                    tvHUDStatus.text = "Status: 信号丢失 (当前为离线历史值)"
+                    tvHUDStatus.setTextColor(android.graphics.Color.RED)
+                    overlayView.setBackgroundBitmap(null) // 丢失时清空背景
+                    overlayView.clearMarkers() // 清除渲染标记
+                    overlayView.setAxis3D(null)
+                }
+            }
+        }
+    }
+
+    private fun setColoredPoseText(tv: android.widget.TextView, x: Double, y: Double, z: Double, title: String) {
+        val xStr = String.format("%.1f", x)
+        val yStr = String.format("%.1f", y)
+        val zStr = String.format("%.1f", z)
+        
+        val fullText = "$title\nX:$xStr  Y:$yStr  Z:$zStr"
+        val spannable = SpannableStringBuilder(fullText)
+        
+        val xIdx = fullText.indexOf("X:$xStr")
+        val yIdx = fullText.indexOf("Y:$yStr")
+        val zIdx = fullText.indexOf("Z:$zStr")
+        
+        if (xIdx != -1) spannable.setSpan(ForegroundColorSpan(Color.RED), xIdx, xIdx + 2 + xStr.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        if (yIdx != -1) spannable.setSpan(ForegroundColorSpan(Color.GREEN), yIdx, yIdx + 2 + yStr.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        if (zIdx != -1) spannable.setSpan(ForegroundColorSpan(Color.BLUE), zIdx, zIdx + 2 + zStr.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        
+        tv.text = spannable
+    }
+}

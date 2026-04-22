@@ -32,7 +32,13 @@ class OverlayView @JvmOverloads constructor(
     private val redPaint = Paint().apply {
         color = Color.RED
         style = Paint.Style.STROKE
-        strokeWidth = 8f
+        strokeWidth = 12f
+        strokeCap = Paint.Cap.ROUND
+    }
+    
+    private val redFillPaint = Paint().apply {
+        color = Color.argb(80, 255, 0, 0)
+        style = Paint.Style.FILL
     }
     
     private val textPaint = Paint().apply {
@@ -64,6 +70,10 @@ class OverlayView @JvmOverloads constructor(
         pathEffect = DashPathEffect(floatArrayOf(20f, 10f, 5f, 10f), 0f)
     }
     
+    private val axisXPaint = Paint().apply { color = Color.RED; strokeWidth = 10f; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+    private val axisYPaint = Paint().apply { color = Color.GREEN; strokeWidth = 10f; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+    private val axisZPaint = Paint().apply { color = Color.BLUE; strokeWidth = 10f; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+    
     private val textBackgroundPaint = Paint().apply {
         color = Color.argb(180, 0, 0, 0)
         style = Paint.Style.FILL
@@ -87,6 +97,7 @@ class OverlayView @JvmOverloads constructor(
     private var baselineHead: List<PointF>? = null
     private var baselineTail: List<PointF>? = null
     private var arucoMarkers: List<ArucoMarker>? = null
+    private var axis3DPoints: List<PointF>? = null
     private var bitmapWidth: Int = 0
     private var bitmapHeight: Int = 0
     // TextureView 在屏幕上的实际显示区域（相对于 OverlayView 自身的坐标）
@@ -139,6 +150,11 @@ class OverlayView @JvmOverloads constructor(
         invalidate()
     }
 
+    fun setAxis3D(points: List<PointF>?) {
+        axis3DPoints = points
+        invalidate()
+    }
+
     fun setBackgroundBitmap(bitmap: Bitmap?) {
         backgroundBitmap = bitmap
         invalidate()
@@ -154,6 +170,7 @@ class OverlayView @JvmOverloads constructor(
         baselineOverall = null
         baselineHead = null
         baselineTail = null
+        axis3DPoints = null
         backgroundBitmap = null
         invalidate()
     }
@@ -190,8 +207,15 @@ class OverlayView @JvmOverloads constructor(
         }
     }
     
+    private var drawCount = 0
+    
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        drawCount++
+        
+        if (drawCount % 30 == 0) {
+            Log.d("OverlayView", "onDraw: markers=${arucoMarkers?.size}, axis=${axis3DPoints?.size}, visibility=$visibility")
+        }
         
         // 绘制背景图片（如果存在）
         backgroundBitmap?.let { bmp ->
@@ -216,7 +240,27 @@ class OverlayView @JvmOverloads constructor(
                 path.lineTo(dstPoints[i * 2], dstPoints[i * 2 + 1])
             }
             path.close()
+            canvas.drawPath(path, redFillPaint)
             canvas.drawPath(path, redPaint)
+        }
+        
+        // 绘制 3D 坐标轴 (RGB)
+        axis3DPoints?.let { pts ->
+            if (pts.size >= 4) {
+                val p0 = floatArrayOf(pts[0].x, pts[0].y)
+                val pX = floatArrayOf(pts[1].x, pts[1].y)
+                val pY = floatArrayOf(pts[2].x, pts[2].y)
+                val pZ = floatArrayOf(pts[3].x, pts[3].y)
+                
+                coordinateMatrix.mapPoints(p0)
+                coordinateMatrix.mapPoints(pX)
+                coordinateMatrix.mapPoints(pY)
+                coordinateMatrix.mapPoints(pZ)
+                
+                canvas.drawLine(p0[0], p0[1], pX[0], pX[1], axisXPaint)
+                canvas.drawLine(p0[0], p0[1], pY[0], pY[1], axisYPaint)
+                canvas.drawLine(p0[0], p0[1], pZ[0], pZ[1], axisZPaint)
+            }
         }
         
         // 绘制芦笋区域（绿色）

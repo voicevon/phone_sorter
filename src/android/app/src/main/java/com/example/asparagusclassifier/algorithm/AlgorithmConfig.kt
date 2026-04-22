@@ -2,6 +2,8 @@ package com.example.asparagusclassifier.algorithm
 
 import org.opencv.core.Point
 import org.opencv.core.Scalar
+import org.opencv.core.MatOfPoint3f
+import org.opencv.core.Point3
 
 /**
  * 算法全局配置
@@ -17,7 +19,16 @@ object AlgorithmConfig {
     // 物理尺寸基准 (单位: mm)
     const val BOARD_WIDTH_MM = 167.0
     const val BOARD_HEIGHT_MM = 250.0
-    const val MM_TO_PX = 10.0 // 标准化分辨率: 10px/mm
+    const val MM_TO_PX_IN_CANVAS_3 = 10.0 // 标准化分辨率: 10px/mm (仅限画布3)
+
+    // ArUco 标记点的 3D 物理坐标 (用于 solvePnP)
+    // 顺序与 AlgorithmProcessor 中的 srcPoints 保持一致: TL, TR, BR, BL
+    val BOARD_OBJECT_POINTS = MatOfPoint3f(
+        org.opencv.core.Point3(-BOARD_WIDTH_MM / 2.0, -BOARD_HEIGHT_MM / 2.0, 0.0), // TL
+        org.opencv.core.Point3(BOARD_WIDTH_MM / 2.0, -BOARD_HEIGHT_MM / 2.0, 0.0),  // TR
+        org.opencv.core.Point3(BOARD_WIDTH_MM / 2.0, BOARD_HEIGHT_MM / 2.0, 0.0),   // BR
+        org.opencv.core.Point3(-BOARD_WIDTH_MM / 2.0, BOARD_HEIGHT_MM / 2.0, 0.0)   // BL
+    )
 
     // 标准化画布配置 (10px/mm)
     const val PADDING_PX = 50.0 // 边缘留白 5mm，防止标记被裁切

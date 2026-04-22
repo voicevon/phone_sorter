@@ -57,6 +57,33 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent" />
 
+    <LinearLayout
+        android:id="@+id/layoutHUD"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="#66000000"
+        android:padding="12dp"
+        app:layout_constraintTop_toTopOf="parent">
+        
+        <TextView
+            android:id="@+id/tvHUDPose"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Camera HUD: X:-- Y:-- Z:--"
+            android:textColor="#00FF00"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+            
+        <TextView
+            android:id="@+id/tvHUDStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Status: 正在初始化实时追踪..."
+            android:textColor="@android:color/white"
+            android:textSize="12sp" />
+    </LinearLayout>
+
     <androidx.constraintlayout.widget.ConstraintLayout
         android:id="@+id/layoutResult"
         android:layout_width="wrap_content"

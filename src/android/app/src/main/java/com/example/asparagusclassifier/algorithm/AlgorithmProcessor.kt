@@ -44,6 +44,7 @@ object AlgorithmProcessor {
         val warpedRgba = Mat(AlgorithmConfig.TARGET_HEIGHT, AlgorithmConfig.TARGET_WIDTH, CvType.CV_8UC4)
         var transMat: Mat? = null
         var mapper: CoordinateMapper? = null
+        var poseInfo: PoseInfo? = null
 
         try {
             Utils.bitmapToMat(workBitmap, rgba)
@@ -104,12 +105,21 @@ object AlgorithmProcessor {
             mapper = CoordinateMapper(scaleFactor, transMat)
             Log.i(TAG, "[Step 3] 透视变换完成 (Warping)")
             
+            // --- Step 3.5: V2 位姿估算 (基于 Canvas 2) ---
+            poseInfo = if (calibration != null && calibration.isValid()) {
+                estimateCameraPose(srcPoints, calibration, workW, workH)
+            } else null
+            
             srcPoints.release()
             dstPoints.release()
             // transMat 将在业务逻辑结束后由 finally 块释放
 
             // --- Step 4: 逻辑画布分析 (Canvas 3 基准) ---
-            val visionResult = AsparagusVisionCore.analyze(warpedRgba, AlgorithmConfig.MM_TO_PX)
+            val visionResult = AsparagusVisionCore.analyze(
+                warpedRgba, 
+                AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
+                poseInfo
+            )
             
             if (!visionResult.success) {
                 Log.e(TAG, "[Step 4] 芦笋视觉分析失败: ${visionResult.error}")
@@ -208,7 +218,29 @@ object AlgorithmProcessor {
                 canvas2Bitmap = c2Bmp,
                 canvas3Bitmap = c3Bmp,
                 processedBitmap = displayBitmap,
-                viewMode = viewMode
+                viewMode = viewMode,
+                
+                // 3D 位姿数据
+                poseDistanceMm = poseInfo?.distanceMm ?: 0.0,
+                tiltAngle = poseInfo?.tiltAngleDeg ?: 0.0,
+                cameraPosWorld = poseInfo?.cameraPosWorld,
+                axis3DPoints = poseInfo?.let { projectAxes(it) },
+                
+                // 芦笋头尾 3D 坐标 (假设 Z=8mm)
+                headPosWorld = visionResult.axisPoints.firstOrNull()?.let {
+                    doubleArrayOf(
+                        (it.x - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
+                        (it.y - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
+                        8.0
+                    )
+                },
+                tailPosWorld = visionResult.axisPoints.lastOrNull()?.let {
+                    doubleArrayOf(
+                        (it.x - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
+                        (it.y - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3,
+                        8.0
+                    )
+                }
             )
 
         } catch (e: Exception) {
@@ -220,13 +252,184 @@ object AlgorithmProcessor {
             warpedRgba.release()
             transMat?.release()
             mapper?.release()
+            poseInfo?.release()
+        }
+    }
+    
+    /**
+     * 实时位姿处理逻辑：
+     * 去除所有芦笋分割和测量，仅保留 ArUco 检测和 solvePnP
+     */
+    fun processRealtimePose(bitmap: Bitmap, calibration: CalibrationData?): AlgorithmResult {
+        val origW = bitmap.width
+        val origH = bitmap.height
+        val scaleFactor = if (maxOf(origW, origH) > AlgorithmConfig.SCAN_MAX_SIDE) {
+            AlgorithmConfig.SCAN_MAX_SIDE.toDouble() / maxOf(origW, origH).toDouble()
+        } else 1.0
+
+        val workW = (origW * scaleFactor).toInt()
+        val workH = (origH * scaleFactor).toInt()
+        
+        val workBitmap = if (scaleFactor < 1.0) {
+            Bitmap.createScaledBitmap(bitmap, workW, workH, true)
+        } else bitmap
+
+        val rgba = Mat()
+        val rgbaUndistorted = Mat()
+        var poseInfo: PoseInfo? = null
+        
+        try {
+            Utils.bitmapToMat(workBitmap, rgba)
+            
+            // 1. 去畸变 (使用缩放后的尺寸)
+            if (calibration != null && calibration.isValid()) {
+                undistortImage(rgba, rgbaUndistorted, calibration, workW, workH)
+            } else {
+                rgba.copyTo(rgbaUndistorted)
+            }
+            
+            // 2. 检测标记
+            val arucoResult = arucoEngine.detectBoardMarkers(rgbaUndistorted)
+            if (!arucoResult.success) {
+                Log.d(TAG, "RealtimePose: ArUco Lost")
+                return AlgorithmResult(false, error = "Aruco Lost (${workW}x${workH})")
+            }
+            Log.d(TAG, "RealtimePose: ArUco Detected, ID=${arucoResult.markerMap.keys}")
+            
+            // 3. 解算位姿
+            val pTL = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_TL]!!)
+            val pTR = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_TR]!!)
+            val pBR = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_BR]!!)
+            val pBL = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_BL]!!)
+
+            val imagePoints = MatOfPoint2f(
+                Point(pTL.x.toDouble(), pTL.y.toDouble()),
+                Point(pTR.x.toDouble(), pTR.y.toDouble()),
+                Point(pBR.x.toDouble(), pBR.y.toDouble()),
+                Point(pBL.x.toDouble(), pBL.y.toDouble())
+            )
+            
+            poseInfo = if (calibration != null && calibration.isValid()) {
+                estimateCameraPose(imagePoints, calibration, workW, workH)
+            } else null
+            
+            imagePoints.release()
+            
+            return AlgorithmResult(
+                success = true,
+                arucoCorners = arucoResult.markerMap.values.toList(),
+                arucoIds = arucoResult.markerMap.keys.toList(),
+                poseDistanceMm = poseInfo?.distanceMm ?: 0.0,
+                tiltAngle = poseInfo?.tiltAngleDeg ?: 0.0,
+                cameraPosWorld = poseInfo?.cameraPosWorld,
+                axis3DPoints = poseInfo?.let { projectAxes(it) },
+                viewMode = 2
+            )
+        } catch (e: Exception) {
+            return AlgorithmResult(false, error = e.message)
+        } finally {
+            rgba.release()
+            rgbaUndistorted.release()
+            poseInfo?.release()
         }
     }
 
-    private fun undistortImage(src: Mat, dst: Mat, calibration: CalibrationData, currentW: Int, currentH: Int) {
-        val camMatrix = Mat(3, 3, CvType.CV_32F)
+    /**
+     * 投影 3D 坐标轴到 2D 像平面
+     * @return [原点, X末端, Y末端, Z末端] 的 2D 坐标列表
+     */
+    private fun projectAxes(pose: PoseInfo): List<android.graphics.PointF> {
+        val axisPoints3D = MatOfPoint3f(
+            Point3(0.0, 0.0, 0.0),    // 原点 (标定板中心)
+            Point3(50.0, 0.0, 0.0),   // X 轴 (红)
+            Point3(0.0, 50.0, 0.0),   // Y 轴 (绿)
+            Point3(0.0, 0.0, 50.0)    // Z 轴 (蓝)
+        )
+        val imagePoints2D = MatOfPoint2f()
+        val distCoeffs = MatOfDouble(0.0, 0.0, 0.0, 0.0, 0.0) // solvePnP 输入已去畸变
         
-        // 关键逻辑：根据当前图像分辨率与传感器参考分辨率的比例，动态缩放内参
+        Calib3d.projectPoints(axisPoints3D, pose.rvec, pose.tvec, pose.cameraMatrix, distCoeffs, imagePoints2D)
+        
+        val list = mutableListOf<android.graphics.PointF>()
+        val data = imagePoints2D.toArray()
+        for (p in data) {
+            list.add(android.graphics.PointF(p.x.toFloat(), p.y.toFloat()))
+        }
+        Log.d(TAG, "RealtimePose: Axis points projected: ${list.size}")
+        
+        axisPoints3D.release()
+        imagePoints2D.release()
+        distCoeffs.release()
+        return list
+    }
+
+    /**
+     * 估算相机在标定板坐标系中的 3D 位姿
+     */
+    private fun estimateCameraPose(
+        imagePoints: MatOfPoint2f, 
+        calibration: CalibrationData,
+        currentW: Int, 
+        currentH: Int
+    ): PoseInfo? {
+        val camMatrix = constructCameraMatrix(calibration, currentW, currentH)
+        val distCoeffs = MatOfDouble(0.0, 0.0, 0.0, 0.0, 0.0) // 已去畸变，系数为0
+        
+        // 直接使用预置的居中标定点矩阵
+        val objectPoints = AlgorithmConfig.BOARD_OBJECT_POINTS
+        
+        val rvec = Mat()
+        val tvec = Mat()
+        
+        val success = Calib3d.solvePnP(objectPoints, imagePoints, camMatrix, distCoeffs, rvec, tvec)
+        
+        if (!success) {
+            Log.e(TAG, "solvePnP 失败")
+            camMatrix.release()
+            objectPoints.release()
+            rvec.release()
+            tvec.release()
+            return null
+        }
+        
+        // 计算距离和角度
+        val tvecArray = DoubleArray(3)
+        tvec.get(0, 0, tvecArray)
+        val distance = Math.sqrt(tvecArray[0] * tvecArray[0] + tvecArray[1] * tvecArray[1] + tvecArray[2] * tvecArray[2])
+        
+        // 角度计算 (简化版：旋转向量的模表示旋转角度)
+        val rvecArray = DoubleArray(3)
+        rvec.get(0, 0, rvecArray)
+        val rotationRad = Math.sqrt(rvecArray[0] * rvecArray[0] + rvecArray[1] * rvecArray[1] + rvecArray[2] * rvecArray[2])
+        val tiltAngleDeg = Math.toDegrees(rotationRad)
+
+        Log.i(TAG, "位姿估算成功: 距离=%.1fmm, 倾角=%.1f°".format(distance, tiltAngleDeg))
+        
+        // 计算相机在世界坐标系 (标定板) 中的位置: Pw = -R^T * t
+        val rMat = Mat()
+        Calib3d.Rodrigues(rvec, rMat)
+        val rMatT = rMat.t()
+        val camWorldMat = Mat()
+        Core.gemm(rMatT, tvec, -1.0, Mat(), 0.0, camWorldMat)
+        
+        val camPosWorld = DoubleArray(3)
+        camWorldMat.get(0, 0, camPosWorld)
+        
+        val info = PoseInfo(rvec.clone(), tvec.clone(), camMatrix.clone(), distance, tiltAngleDeg, camPosWorld)
+        
+        rMat.release()
+        rMatT.release()
+        camWorldMat.release()
+        
+        camMatrix.release()
+        rvec.release()
+        tvec.release()
+        
+        return info
+    }
+
+    private fun constructCameraMatrix(calibration: CalibrationData, currentW: Int, currentH: Int): Mat {
+        val camMatrix = Mat(3, 3, CvType.CV_32F)
         val scaleX = currentW.toDouble() / calibration.sensorWidth.toDouble()
         val scaleY = currentH.toDouble() / calibration.sensorHeight.toDouble()
         
@@ -242,14 +445,36 @@ object AlgorithmProcessor {
         camMatrix.put(1, 1, fy)
         camMatrix.put(1, 2, cy)
         camMatrix.put(2, 2, 1.0)
-        
-        Log.d(TAG, "执行去畸变: 比例X=%.3f, 焦距=(%.1f, %.1f), 主点=(%.1f, %.1f)".format(scaleX, fx, fy, cx, cy))
-        
+        return camMatrix
+    }
+
+    private fun undistortImage(src: Mat, dst: Mat, calibration: CalibrationData, currentW: Int, currentH: Int) {
+        val camMatrix = constructCameraMatrix(calibration, currentW, currentH)
         val distCoeffs = MatOfDouble(*DoubleArray(calibration.distortion.size) { calibration.distortion[it].toDouble() })
+        
+        Log.d(TAG, "执行去畸变...")
         Calib3d.undistort(src, dst, camMatrix, distCoeffs)
         
         camMatrix.release()
         distCoeffs.release()
+    }
+
+    /**
+     * 封装位姿信息，便于传递和释放
+     */
+    data class PoseInfo(
+        val rvec: Mat,
+        val tvec: Mat,
+        val cameraMatrix: Mat,
+        val distanceMm: Double,
+        val tiltAngleDeg: Double,
+        val cameraPosWorld: DoubleArray? = null
+    ) {
+        fun release() {
+            rvec.release()
+            tvec.release()
+            cameraMatrix.release()
+        }
     }
 
     private fun matToBitmap(mat: Mat): Bitmap {

@@ -61,6 +61,8 @@
 - **职责**：基于四个 ArUco 标记的位置执行透视变换。
 - **规格**：分辨率固定为 **1670 x 2500 像素**。
 - **特征**：图像纠正为标准俯视图。标定板外部背景将被强制裁切丢弃，仅保留 167x250mm 的核心检测区。
+- **演进预告 (V2)**：针对 Canvas 3 在 3D 投影上的局限性（倾斜视角下的直径失真），系统正在评估基于 3D 位姿解算的 **V2 算法**。详细分析请参阅：[ANALYSIS_ALGO_V2_3D.md](file:///d:/Software/antigravity/phone_sorter/docs/ANALYSIS_ALGO_V2_3D.md)。
+- **工作流增强 (Level 2)**：针对检测抖动，引入基于时间轴的多帧采样平均方案。详细评估请参阅：[ANALYSIS_WORKFLOW_LEVEL2.md](file:///d:/Software/antigravity/phone_sorter/docs/ANALYSIS_WORKFLOW_LEVEL2.md)。
 
 ---
 

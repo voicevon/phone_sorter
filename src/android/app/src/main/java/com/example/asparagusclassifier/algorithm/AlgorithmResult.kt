@@ -33,5 +33,16 @@ data class AlgorithmResult(
     val canvas2Bitmap: android.graphics.Bitmap? = null, // 去畸变
     val canvas3Bitmap: android.graphics.Bitmap? = null, // 标准
     val viewMode: Int = 3, // 1: Raw, 2: Undistorted, 3: Analysis
+    
+    // V2 3D 位姿诊断字段
+    val poseDistanceMm: Double = 0.0, // 相机到标定板中心的垂直距离
+    val tiltAngle: Double = 0.0,      // 相机相对于标定板的倾斜角 (Degree)
+    
+    val cameraPosWorld: DoubleArray? = null, // [X, Y, Z] in mm
+    val headPosWorld: DoubleArray? = null,
+    val tailPosWorld: DoubleArray? = null,
+    
+    val axis3DPoints: List<android.graphics.PointF>? = null, // [Origin, X, Y, Z] projected points
+    
     val error: String? = null
 )

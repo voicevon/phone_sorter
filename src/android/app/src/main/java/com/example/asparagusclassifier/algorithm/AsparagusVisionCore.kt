@@ -4,6 +4,7 @@ import android.graphics.PointF
 import android.util.Log
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
+import org.opencv.calib3d.Calib3d
 import kotlin.math.sqrt
 
 /**
@@ -40,7 +41,11 @@ object AsparagusVisionCore {
     /**
      * 在标准化空间执行分析
      */
-    fun analyze(warpedRgba: Mat, pixelsPerMm: Double): AnalysisResult {
+    fun analyze(
+        warpedRgba: Mat, 
+        pixelsPerMm: Double,
+        poseInfo: AlgorithmProcessor.PoseInfo? = null
+    ): AnalysisResult {
         val hsv = Mat()
         val mask = Mat()
         val hierarchy = Mat()
@@ -91,14 +96,23 @@ object AsparagusVisionCore {
             val diameterLines = mutableListOf<List<PointF>>()
 
             if (orientedAxis.size >= 2) {
-                // 长度
+                // 计算 V1 长度（像素累加）作为对比
                 var totalLengthPx = 0.0
                 for (i in 0 until orientedAxis.size - 1) {
                     totalLengthPx += dist(orientedAxis[i], orientedAxis[i+1])
                 }
-                lengthMm = totalLengthPx / pixelsPerMm
 
-                // 直径采样
+                if (poseInfo != null) {
+                    // 1. 长度计算 (3D 欧几里得距离)
+                    val pStart3D = mapCanvas3ToWorld3D(orientedAxis.first(), 8.0, poseInfo) // 假设中心轴高度 8mm
+                    val pEnd3D = mapCanvas3ToWorld3D(orientedAxis.last(), 8.0, poseInfo)
+                    lengthMm = dist3D(pStart3D, pEnd3D)
+                    Log.i(TAG, "V2 3D 长度: %.1fmm (V1 估计: %.1fmm)".format(lengthMm, totalLengthPx / pixelsPerMm))
+                } else {
+                    lengthMm = totalLengthPx / pixelsPerMm
+                }
+
+                // 2. 直径采样 (深度补偿)
                 val diameterSamples = mutableListOf<Double>()
                 for (offsetMm in AlgorithmConfig.SAMPLING_OFFSETS_MM) {
                     val offsetPx = offsetMm * pixelsPerMm
@@ -106,8 +120,30 @@ object AsparagusVisionCore {
                     
                     if (sampleP != null && normalV != null) {
                         val widthPx = measureWidth(mask, sampleP, normalV)
-                        diameterSamples.add(widthPx / pixelsPerMm)
                         
+                        val sampleDiameterMm = if (poseInfo != null) {
+                            // 计算采样点到相机的实时深度
+                            val samplePF = PointF(sampleP.x.toFloat(), sampleP.y.toFloat())
+                            val pWorld3D = mapCanvas3ToWorld3D(samplePF, 10.0, poseInfo) // 假设高度 10mm
+                            val pCam = transformWorldToCamera(pWorld3D, poseInfo)
+                            val depth = sqrt(pCam.x * pCam.x + pCam.y * pCam.y + pCam.z * pCam.z)
+                            
+                            // D_mm = D_px * (depth / focal_length)
+                            // 注意：focal_length 在 cameraMatrix 的 (0,0) 和 (1,1)
+                            val fx = poseInfo.cameraMatrix.get(0, 0)[0]
+                            val fy = poseInfo.cameraMatrix.get(1, 1)[0]
+                            val fAvg = (fx + fy) / 2.0
+                            
+                            val dMm = (widthPx / fAvg) * depth
+                            Log.d(TAG, "采样点深度补偿: Depth=%.1fmm, D_px=%.1f, D_mm=%.2f".format(depth, widthPx, dMm))
+                            dMm
+                        } else {
+                            widthPx / pixelsPerMm
+                        }
+                        
+                        diameterSamples.add(sampleDiameterMm)
+                        
+                        // 记录测量线用于 UI 展示
                         diameterLines.add(listOf(
                             PointF((sampleP.x - normalV.x * widthPx/2).toFloat(), (sampleP.y - normalV.y * widthPx/2).toFloat()),
                             PointF((sampleP.x + normalV.x * widthPx/2).toFloat(), (sampleP.y + normalV.y * widthPx/2).toFloat())
@@ -413,4 +449,39 @@ object AsparagusVisionCore {
     }
 
     private fun dist(p1: PointF, p2: PointF) = sqrt(((p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y)).toDouble())
+
+    /**
+     * 将 Canvas 3 坐标映射到世界 3D 坐标
+     * Canvas 3 是 Z=0 平面的透视映射
+     */
+    private fun mapCanvas3ToWorld3D(p: PointF, z: Double, poseInfo: AlgorithmProcessor.PoseInfo): Point3 {
+        val xWorld = (p.x - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3
+        val yWorld = (p.y - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3
+        return Point3(xWorld, yWorld, z)
+    }
+
+    /**
+     * 世界坐标 -> 相机坐标系
+     * Pc = R * Pw + t
+     */
+    private fun transformWorldToCamera(pw: Point3, poseInfo: AlgorithmProcessor.PoseInfo): Point3 {
+        val rMat = Mat()
+        Calib3d.Rodrigues(poseInfo.rvec, rMat)
+        
+        val rData = DoubleArray(9)
+        rMat.get(0, 0, rData)
+        
+        val tData = DoubleArray(3)
+        poseInfo.tvec.get(0, 0, tData)
+        
+        val xc = rData[0] * pw.x + rData[1] * pw.y + rData[2] * pw.z + tData[0]
+        val yc = rData[3] * pw.x + rData[4] * pw.y + rData[5] * pw.z + tData[1]
+        val zc = rData[6] * pw.x + rData[7] * pw.y + rData[8] * pw.z + tData[2]
+        
+        rMat.release()
+        return Point3(xc, yc, zc)
+    }
+
+    private fun dist3D(p1: Point3, p2: Point3) = 
+        sqrt((p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y) + (p1.z - p2.z) * (p1.z - p2.z))
 }
