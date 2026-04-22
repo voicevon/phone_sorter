@@ -75,7 +75,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             if (viewModel.isRealtimePoseActive.value == true) {
                 updateRealtimePose()
             }
-            realtimePoseHandler.postDelayed(this, 300) // 约 3 FPS，平衡性能与发热
+            realtimePoseHandler.postDelayed(this, 33) // 提升至约 30 FPS，展现原始实时性能
         }
     }
 
@@ -270,11 +270,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         menuInflater.inflate(R.menu.main_menu, menu)
         // 根据初始 ViewModel 中的 viewMode 设置勾选状态
         val mode = viewModel.viewMode.value ?: 2
-        val initialId = when(mode) {
-            1 -> R.id.menu_view_raw
-            2 -> R.id.menu_view_corrected
-            else -> R.id.menu_view_analysis
-        }
+        val initialId = if (mode == 1) R.id.menu_view_raw else R.id.menu_view_corrected
         menu?.findItem(initialId)?.isChecked = true
         return true
     }
@@ -290,13 +286,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             R.id.menu_view_corrected -> {
                 item.isChecked = true
                 viewModel.setViewMode(2)
-                android.widget.Toast.makeText(this, "切换至：去畸变视图 (C2)", android.widget.Toast.LENGTH_SHORT).show()
-                true
-            }
-            R.id.menu_view_analysis -> {
-                item.isChecked = true
-                viewModel.setViewMode(3)
-                android.widget.Toast.makeText(this, "切换至：标准分析视图 (C3)", android.widget.Toast.LENGTH_SHORT).show()
+                android.widget.Toast.makeText(this, "切换至：3D 分析视图 (C2)", android.widget.Toast.LENGTH_SHORT).show()
                 true
             }
             R.id.action_camera_params -> {
@@ -306,7 +296,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             R.id.action_about -> {
                 android.app.AlertDialog.Builder(this)
                     .setTitle("冯氏芦笋工具")
-                    .setMessage("设计师：冯工\n数据架构：三画布诊断系统\n2026年4月")
+                    .setMessage("设计师：冯工\n数据架构：3D 位姿实时系统\n2026年4月")
                     .setNeutralButton("下载校准图纸") { _, _ ->
                         val intent = android.content.Intent(
                             android.content.Intent.ACTION_VIEW,
@@ -406,9 +396,14 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         val isZero = result.diameter <= 0.0
         
         if (!isZero) {
-            val diameterCm = result.diameter / 10.0
-            val lengthCm = result.length / 10.0
-            val ttsText = "直径 ${String.format(java.util.Locale.US, "%.1f", diameterCm)}，长度 ${lengthCm.toInt()}"
+            val ttsText = if (result.grade == "F") {
+                val reason = result.error ?: "不合格"
+                "不合格品，原因：$reason"
+            } else {
+                val diameterCm = result.diameter / 10.0
+                val lengthCm = result.length / 10.0
+                "${result.grade} 级，直径 ${String.format(java.util.Locale.US, "%.1f", diameterCm)} 厘米，长度 ${lengthCm.toInt()} 厘米"
+            }
             ttsManager.speak(ttsText)
         }
         
@@ -426,46 +421,24 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         if (lastBitmap == null) return
 
         // 策略：根据 viewMode 决定显示什么
-        when (result.viewMode) {
-            1 -> {
-                // 原始视图：不显示叠加
-                overlayView.visibility = View.INVISIBLE
-            }
-            2 -> {
-                // 去畸变视图：显示 ArUco 标记及投影回物理空间的测量结果
-                if (result.arucoCorners != null && result.arucoIds != null) {
-                    val markers = result.arucoCorners.zip(result.arucoIds).map { (corners, id) ->
-                        com.example.asparagusclassifier.ui.ArucoMarker(corners, id)
-                    }
-                    overlayView.setArucoMarkers(markers, lastBitmap!!.width, lastBitmap!!.height, 0)
-                    overlayView.setBackgroundBitmap(result.processedBitmap)
-                    
-                    // 显示反向投影后的芦笋特征线
-                    if (result.asparagusContour != null) {
-                        overlayView.setAsparagusContour(result.asparagusContour)
-                        overlayView.setAsparagusTail(result.tailPoint)
-                        overlayView.setDiameterLines(result.diameterLine)
-                        overlayView.setAxisPath(result.axisPath)
-                        overlayView.setBaselines(result.baselineOverall, result.baselineHead, result.baselineTail)
-                        overlayView.visibility = View.VISIBLE
-                    }
+        if (result.viewMode == 1) {
+            overlayView.visibility = View.INVISIBLE
+        } else {
+            // 3D 分析视图 (C2)
+            if (result.arucoCorners != null && result.arucoIds != null) {
+                val markers = result.arucoCorners.zip(result.arucoIds).map { (corners, id) ->
+                    com.example.asparagusclassifier.ui.ArucoMarker(corners, id)
                 }
-            }
-            3 -> {
-                // 标准分析视图：显示芦笋轮廓与测量数据
+                overlayView.setArucoMarkers(markers, lastBitmap!!.width, lastBitmap!!.height, 0)
+                overlayView.setBackgroundBitmap(result.processedBitmap)
+                
+                // 显示反向投影后的芦笋特征线
                 if (result.asparagusContour != null) {
-                    val markers = if (result.arucoCorners != null && result.arucoIds != null) {
-                        result.arucoCorners.zip(result.arucoIds).map { (corners, id) ->
-                            com.example.asparagusclassifier.ui.ArucoMarker(corners, id)
-                        }
-                    } else emptyList()
-                    
-                    overlayView.setArucoMarkers(markers, lastBitmap!!.width, lastBitmap!!.height, 0)
-                    overlayView.setBackgroundBitmap(result.processedBitmap)
                     overlayView.setAsparagusContour(result.asparagusContour)
                     overlayView.setAsparagusTail(result.tailPoint)
                     overlayView.setDiameterLines(result.diameterLine)
                     overlayView.setAxisPath(result.axisPath)
+                    overlayView.setBaselines(result.baselineOverall, result.baselineHead, result.baselineTail)
                     overlayView.visibility = View.VISIBLE
                 }
             }
@@ -557,10 +530,11 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                     lastSignalTime = System.currentTimeMillis()
                     
                 } else {
-                    // 信号丢失时，仅更新 HUD，不清除 OverlayView 的任何内容
-                    tvHUDPose.text = lastPoseWorldText
-                    tvHUDStatus.text = "Status: 信号丢失 (锁定末帧显示)"
-                    tvHUDStatus.setTextColor(android.graphics.Color.YELLOW)
+                    // 信号丢失时直接显示，不再锁定末帧，展现真实解算状态
+                    tvHUDPose.text = "X:--- Y:--- Z:---"
+                    tvHUDStatus.text = "Status: 信号丢失 (实时)"
+                    tvHUDStatus.setTextColor(android.graphics.Color.RED)
+                    overlayView.clearMarkers()
                 }
             }
         }

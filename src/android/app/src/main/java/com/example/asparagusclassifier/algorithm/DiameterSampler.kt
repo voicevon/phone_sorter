@@ -115,10 +115,10 @@ object DiameterSampler {
      */
     private fun computeCompensatedDiameter(sampleP: Point, widthPx: Double, poseInfo: PoseEstimator.PoseInfo): Double {
         val samplePF = PointF(sampleP.x.toFloat(), sampleP.y.toFloat())
-        // 假设芦笋中心轴高度约为 10mm (根据物理传送带支架估算)
-        val pWorld3D = PoseEstimator.mapCanvas3ToWorld3D(samplePF, 10.0)
+        // 假设芦笋中心轴高度约为 8mm
+        val pWorld3D = PoseEstimator.mapImageToWorld3D(samplePF, 8.0, poseInfo)
         val pCam = PoseEstimator.transformWorldToCamera(pWorld3D, poseInfo)
-        val depth = sqrt(pCam.x * pCam.x + pCam.y * pCam.y + pCam.z * pCam.z)
+        val depth = pCam.z // 使用 Z 轴深度即可
         
         // 提取焦距
         val fx = poseInfo.cameraMatrix.get(0, 0)[0]

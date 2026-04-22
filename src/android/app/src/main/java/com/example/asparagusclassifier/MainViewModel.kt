@@ -20,7 +20,7 @@ import kotlinx.coroutines.launch
 class MainViewModel(private val visionRepository: VisionRepository) : ViewModel() {
     private val TAG = "MainViewModel"
 
-    // 视图模式 (1: Raw, 2: Corrected, 3: Analysis)
+    // 视图模式 (1: Raw, 2: 3D Analysis)
     private val _viewMode = MutableLiveData(2)
     val viewMode: LiveData<Int> = _viewMode
 

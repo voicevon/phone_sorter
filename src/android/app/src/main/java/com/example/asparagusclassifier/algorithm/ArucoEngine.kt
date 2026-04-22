@@ -11,7 +11,7 @@ import org.opencv.imgproc.Imgproc
 /**
  * ArUco 标记检测引擎
  * 负责识别标定板上的 4 个关键标记
- * 在“三画布”架构中，它假定输入的图像已经是去畸变的物理图像
+ * 输入通常为去畸变后的物理图像
  */
 class ArucoEngine(
     private val dictionaryId: Int = Objdetect.DICT_4X4_50

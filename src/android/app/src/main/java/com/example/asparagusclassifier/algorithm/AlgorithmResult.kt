@@ -28,11 +28,10 @@ data class AlgorithmResult(
     val baselineHead: List<PointF>? = null,
     val baselineTail: List<PointF>? = null,
     val diagStrips: List<android.graphics.Bitmap>? = null, // 头、中、尾三段诊断切片图
-    val processedBitmap: android.graphics.Bitmap? = null, // 当前视图位图 (C1/C2/C3)
+    val processedBitmap: android.graphics.Bitmap? = null, // 当前视图位图 (C1/C2)
     val canvas1Bitmap: android.graphics.Bitmap? = null, // 原始
     val canvas2Bitmap: android.graphics.Bitmap? = null, // 去畸变
-    val canvas3Bitmap: android.graphics.Bitmap? = null, // 标准
-    val viewMode: Int = 3, // 1: Raw, 2: Undistorted, 3: Analysis
+    val viewMode: Int = 2, // 1: Raw, 2: 3D Analysis (on Undistorted)
     
     // V2 3D 位姿诊断字段
     val poseDistanceMm: Double = 0.0, // 相机到标定板中心的垂直距离
