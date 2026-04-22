@@ -4,6 +4,7 @@ import android.graphics.PointF
 import android.util.Log
 import org.opencv.core.*
 import org.opencv.imgproc.Imgproc
+import com.example.asparagusclassifier.util.useMatScope
 import kotlin.math.sqrt
 
 /**
@@ -39,22 +40,23 @@ object AsparagusVisionCore {
         warpedRgba: Mat, 
         pixelsPerMm: Double,
         poseInfo: PoseEstimator.PoseInfo? = null
-    ): AnalysisResult {
-        val hsv = Mat()
-        val mask = Mat()
-        val hierarchy = Mat()
+    ): AnalysisResult = useMatScope { scope ->
+        val hsv = scope.createMat()
+        val mask = scope.createMat()
+        val hierarchy = scope.createMat()
         
         try {
             // 1. 预处理与分割
             Imgproc.cvtColor(warpedRgba, hsv, Imgproc.COLOR_RGB2HSV)
             
-            val roiMask = Mat.zeros(warpedRgba.size(), CvType.CV_8UC1)
+            val roiMask = scope.createMat()
+            roiMask.create(warpedRgba.size(), CvType.CV_8UC1)
+            roiMask.setTo(Scalar(0.0))
             val boardRect = Rect(10, 10, warpedRgba.cols() - 20, warpedRgba.rows() - 20)
             Imgproc.rectangle(roiMask, boardRect, Scalar(255.0), -1)
             
             Core.inRange(hsv, AlgorithmConfig.LOWER_GREEN, AlgorithmConfig.UPPER_GREEN, mask)
             Core.bitwise_and(mask, roiMask, mask)
-            roiMask.release()
             
             val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0))
             Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_OPEN, kernel)
@@ -64,10 +66,14 @@ object AsparagusVisionCore {
             // 2. 轮廓提取
             val contours = mutableListOf<MatOfPoint>()
             Imgproc.findContours(mask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+            
+            // 确保所有的 contour Mat 也能被 scope 管理 (虽然这里只取一个)
+            contours.forEach { scope.manage(it) }
+            
             val maxContour = contours.maxByOrNull { Imgproc.contourArea(it) }
             
             if (maxContour == null || Imgproc.contourArea(maxContour) < AlgorithmConfig.MIN_CONTOUR_AREA) {
-                return AnalysisResult(false, error = "未检测到芦笋或面积过小")
+                return@useMatScope AnalysisResult(false, error = "未检测到芦笋或面积过小")
             }
 
             // 3. 特征提取 (紫根、中心线、方向)
@@ -109,7 +115,7 @@ object AsparagusVisionCore {
                 bTail = resTail.endpoints
             }
 
-            return AnalysisResult(
+            AnalysisResult(
                 success = true,
                 grade = calculateGrade(correctedDiameter),
                 diameterMm = correctedDiameter,
@@ -129,11 +135,7 @@ object AsparagusVisionCore {
 
         } catch (e: Exception) {
             Log.e(TAG, "分析过程异常: ${e.message}")
-            return AnalysisResult(false, error = e.message)
-        } finally {
-            hsv.release()
-            mask.release()
-            hierarchy.release()
+            AnalysisResult(false, error = e.message)
         }
     }
 

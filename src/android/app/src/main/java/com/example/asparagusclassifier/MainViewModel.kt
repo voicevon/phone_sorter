@@ -44,7 +44,9 @@ class MainViewModel(private val visionRepository: VisionRepository) : ViewModel(
     private val _captureRequest = MutableLiveData<Long>()
     val captureRequest: LiveData<Long> = _captureRequest
 
-    // 分析状态
+    // 平滑后的相机位姿 (X, Y, Z)
+    private var smoothedCameraPos: DoubleArray? = null
+    private val SMOOTHING_FACTOR = 0.25 // 越小越稳定，越大越灵敏
     private val _isAnalyzing = MutableLiveData(false)
     val isAnalyzing: LiveData<Boolean> = _isAnalyzing
 
@@ -115,7 +117,28 @@ class MainViewModel(private val visionRepository: VisionRepository) : ViewModel(
             try {
                 // 确保在挂起环境中调用
                 val result = visionRepository.analyzeRealtimePose(bitmap, _currentCalibration.value)
-                onResult(result)
+                
+                // 应用一阶低通滤波平滑位姿
+                val rawPos = result.cameraPosWorld
+                if (rawPos != null) {
+                    val currentSmooth = smoothedCameraPos
+                    if (currentSmooth == null) {
+                        smoothedCameraPos = rawPos.copyOf()
+                    } else {
+                        for (i in rawPos.indices) {
+                            currentSmooth[i] = SMOOTHING_FACTOR * rawPos[i] + (1 - SMOOTHING_FACTOR) * currentSmooth[i]
+                        }
+                    }
+                }
+                
+                // 将平滑后的数据回传给结果对象（保持引用透明）
+                val filteredResult = if (smoothedCameraPos != null) {
+                    result.copy(cameraPosWorld = smoothedCameraPos!!.copyOf())
+                } else {
+                    result
+                }
+                
+                onResult(filteredResult)
             } catch (e: Exception) {
                 Log.e(TAG, "实时分析失败: ${e.message}")
             }
