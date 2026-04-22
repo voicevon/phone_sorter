@@ -31,8 +31,14 @@ class MainViewModel : ViewModel() {
     private val _isAutoCaptureEnabled = MutableLiveData(false)
     val isAutoCaptureEnabled: LiveData<Boolean> = _isAutoCaptureEnabled
 
+    // 抓拍请求事件 (通过时间戳触发)
+    private val _captureRequest = MutableLiveData<Long>()
+    val captureRequest: LiveData<Long> = _captureRequest
+
     fun setViewMode(mode: Int) {
-        _viewMode.value = mode
+        if (_viewMode.value != mode) {
+            _viewMode.value = mode
+        }
     }
 
     fun setLastResult(result: AlgorithmResult?) {
@@ -44,10 +50,18 @@ class MainViewModel : ViewModel() {
     }
 
     fun setRealtimePoseActive(active: Boolean) {
-        _isRealtimePoseActive.value = active
+        if (_isRealtimePoseActive.value != active) {
+            _isRealtimePoseActive.value = active
+        }
     }
 
     fun setAutoCaptureEnabled(enabled: Boolean) {
-        _isAutoCaptureEnabled.value = enabled
+        if (_isAutoCaptureEnabled.value != enabled) {
+            _isAutoCaptureEnabled.value = enabled
+        }
+    }
+
+    fun requestCapture() {
+        _captureRequest.value = System.currentTimeMillis()
     }
 }

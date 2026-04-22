@@ -19,15 +19,38 @@ object AlgorithmConfig {
     // 物理尺寸基准 (单位: mm)
     const val BOARD_WIDTH_MM = 167.0
     const val BOARD_HEIGHT_MM = 250.0
+    const val MARKER_SIZE_MM = 30.0 // 假设 ArUco 标记边长为 30mm
     const val MM_TO_PX_IN_CANVAS_3 = 10.0 // 标准化分辨率: 10px/mm (仅限画布3)
+
+    // ArUco 标记点的 3D 物理坐标 (16 点模型：4 个标记 * 每个标记 4 个角点)
+    // 顺序: TL(4点), TR(4点), BR(4点), BL(4点)
+    val BOARD_OBJECT_POINTS_16 = MatOfPoint3f(*run {
+        val s = MARKER_SIZE_MM / 2.0
+        val hw = BOARD_WIDTH_MM / 2.0
+        val hh = BOARD_HEIGHT_MM / 2.0
+        arrayOf(
+            // TL (ID 10)
+            Point3(-hw - s, hh + s, 0.0), Point3(-hw + s, hh + s, 0.0), 
+            Point3(-hw + s, hh - s, 0.0), Point3(-hw - s, hh - s, 0.0),
+            // TR (ID 13)
+            Point3(hw - s, hh + s, 0.0), Point3(hw + s, hh + s, 0.0), 
+            Point3(hw + s, hh - s, 0.0), Point3(hw - s, hh - s, 0.0),
+            // BR (ID 42)
+            Point3(hw - s, -hh + s, 0.0), Point3(hw + s, -hh + s, 0.0), 
+            Point3(hw + s, -hh - s, 0.0), Point3(hw - s, -hh - s, 0.0),
+            // BL (ID 40)
+            Point3(-hw - s, -hh + s, 0.0), Point3(-hw + s, -hh + s, 0.0), 
+            Point3(-hw + s, -hh - s, 0.0), Point3(-hw - s, -hh - s, 0.0)
+        )
+    })
 
     // ArUco 标记点的 3D 物理坐标 (用于 solvePnP)
     // 顺序与 AlgorithmProcessor 中的 srcPoints 保持一致: TL, TR, BR, BL
     val BOARD_OBJECT_POINTS = MatOfPoint3f(
-        org.opencv.core.Point3(-BOARD_WIDTH_MM / 2.0, -BOARD_HEIGHT_MM / 2.0, 0.0), // TL
-        org.opencv.core.Point3(BOARD_WIDTH_MM / 2.0, -BOARD_HEIGHT_MM / 2.0, 0.0),  // TR
-        org.opencv.core.Point3(BOARD_WIDTH_MM / 2.0, BOARD_HEIGHT_MM / 2.0, 0.0),   // BR
-        org.opencv.core.Point3(-BOARD_WIDTH_MM / 2.0, BOARD_HEIGHT_MM / 2.0, 0.0)   // BL
+        org.opencv.core.Point3(-BOARD_WIDTH_MM / 2.0, BOARD_HEIGHT_MM / 2.0, 0.0),  // TL
+        org.opencv.core.Point3(BOARD_WIDTH_MM / 2.0, BOARD_HEIGHT_MM / 2.0, 0.0),   // TR
+        org.opencv.core.Point3(BOARD_WIDTH_MM / 2.0, -BOARD_HEIGHT_MM / 2.0, 0.0),  // BR
+        org.opencv.core.Point3(-BOARD_WIDTH_MM / 2.0, -BOARD_HEIGHT_MM / 2.0, 0.0)  // BL
     )
 
     // 标准化画布配置 (10px/mm)

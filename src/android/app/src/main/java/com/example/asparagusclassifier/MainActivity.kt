@@ -59,10 +59,12 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     private lateinit var tvHUDStatus: TextView
     private lateinit var viewModel: MainViewModel
     private lateinit var visionRepository: VisionRepository
-    private lateinit var tts: TextToSpeech
+    private lateinit var ttsManager: com.example.asparagusclassifier.util.TtsManager
     
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
-    private var lastPoseWorldText: CharSequence = "Cam Pos (World):\nX:--  Y:--  Z:--"
+    private var lastPoseWorldText: CharSequence = ""
+    private var lastSignalTime = 0L // 上次检测到信号的时间
+    private val POSE_PERSIST_MS = 1000L // 位姿保留 1 秒，防止闪烁
     
     private val realtimePoseHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val realtimePoseRunnable = object : java.lang.Runnable {
@@ -76,10 +78,8 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
 
     private val autoCaptureRunnable = object : java.lang.Runnable {
         override fun run() {
-            if (cbAuto.isChecked) {
-                if (btnCapture.isEnabled) {
-                    btnCapture.performClick()
-                }
+            if (cbAuto.isChecked && btnCapture.isEnabled) {
+                viewModel.requestCapture()
             }
         }
     }
@@ -102,11 +102,9 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             actionBar.title = spannableTitle
         }
         
-        tts = TextToSpeech(this) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                tts.language = Locale.CHINESE
-            }
-        }
+        // 初始化 TTS 管理器并注册生命周期观察
+        ttsManager = com.example.asparagusclassifier.util.TtsManager(this)
+        lifecycle.addObserver(ttsManager)
         
         if (!OpenCVLoader.initDebug()) {
             Log.e(TAG, "OpenCV 初始化失败！")
@@ -205,8 +203,12 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         viewModel.isAutoCaptureEnabled.observe(this) { enabled ->
             handler.removeCallbacks(autoCaptureRunnable)
             if (enabled) {
-                handler.post(autoCaptureRunnable)
+                handler.postDelayed(autoCaptureRunnable, 1000L)
             }
+        }
+
+        viewModel.captureRequest.observe(this) {
+            captureAndProcess()
         }
     }
 
@@ -404,11 +406,11 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         
         val isZero = result.diameter <= 0.0
         
-        if (!isZero && ::tts.isInitialized) {
+        if (!isZero) {
             val diameterCm = result.diameter / 10.0
             val lengthCm = result.length / 10.0
             val ttsText = "直径 ${String.format(java.util.Locale.US, "%.1f", diameterCm)}，长度 ${lengthCm.toInt()}"
-            tts.speak(ttsText, TextToSpeech.QUEUE_FLUSH, null, null)
+            ttsManager.speak(ttsText)
         }
         
         if (viewModel.isAutoCaptureEnabled.value == true) {
@@ -511,10 +513,6 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(autoCaptureRunnable)
-        if (::tts.isInitialized) {
-            tts.stop()
-            tts.shutdown()
-        }
         visionRepository.release()
         cameraManager.release()
     }
@@ -541,7 +539,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                     if (cam != null) {
                         setColoredPoseText(tvHUDPose, cam[0], cam[1], Math.abs(cam[2]), "Cam Pos (World):")
                         lastPoseWorldText = tvHUDPose.text
-                        tvHUDStatus.text = "Status: 已对准 (实时解算), 倾角:%.1f°".format(result.tiltAngle)
+                        tvHUDStatus.text = "Status: 已对准 (实时解算)"
                         tvHUDStatus.setTextColor(android.graphics.Color.GREEN)
                     }
                     
@@ -555,15 +553,15 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                         overlayView.setArucoMarkers(markers, displayBmp.width, displayBmp.height, 0)
                     }
                     overlayView.setAxis3D(result.axis3DPoints)
+                    overlayView.setMarkerAxes(result.markerAxes)
                     overlayView.visibility = android.view.View.VISIBLE
+                    lastSignalTime = System.currentTimeMillis()
                     
                 } else {
+                    // 信号丢失时，仅更新 HUD，不清除 OverlayView 的任何内容
                     tvHUDPose.text = lastPoseWorldText
-                    tvHUDStatus.text = "Status: 信号丢失 (当前为离线历史值)"
-                    tvHUDStatus.setTextColor(android.graphics.Color.RED)
-                    overlayView.setBackgroundBitmap(null)
-                    overlayView.clearMarkers()
-                    overlayView.setAxis3D(null)
+                    tvHUDStatus.text = "Status: 信号丢失 (锁定末帧显示)"
+                    tvHUDStatus.setTextColor(android.graphics.Color.YELLOW)
                 }
             }
         }

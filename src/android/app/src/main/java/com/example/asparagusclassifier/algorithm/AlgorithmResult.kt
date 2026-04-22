@@ -43,6 +43,7 @@ data class AlgorithmResult(
     val tailPosWorld: DoubleArray? = null,
     
     val axis3DPoints: List<android.graphics.PointF>? = null, // [Origin, X, Y, Z] projected points
+    val markerAxes: Map<Int, List<android.graphics.PointF>>? = null, // 每个 ID 对应的 [Origin, X, Y, Z]
     
     val error: String? = null
 )

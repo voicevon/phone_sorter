@@ -44,7 +44,7 @@ object AsparagusVisionCore {
     fun analyze(
         warpedRgba: Mat, 
         pixelsPerMm: Double,
-        poseInfo: AlgorithmProcessor.PoseInfo? = null
+        poseInfo: PoseEstimator.PoseInfo? = null
     ): AnalysisResult {
         val hsv = Mat()
         val mask = Mat()
@@ -454,7 +454,7 @@ object AsparagusVisionCore {
      * 将 Canvas 3 坐标映射到世界 3D 坐标
      * Canvas 3 是 Z=0 平面的透视映射
      */
-    private fun mapCanvas3ToWorld3D(p: PointF, z: Double, poseInfo: AlgorithmProcessor.PoseInfo): Point3 {
+    private fun mapCanvas3ToWorld3D(p: PointF, z: Double, poseInfo: PoseEstimator.PoseInfo): Point3 {
         val xWorld = (p.x - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3
         val yWorld = (p.y - AlgorithmConfig.PADDING_PX) / AlgorithmConfig.MM_TO_PX_IN_CANVAS_3
         return Point3(xWorld, yWorld, z)
@@ -464,7 +464,7 @@ object AsparagusVisionCore {
      * 世界坐标 -> 相机坐标系
      * Pc = R * Pw + t
      */
-    private fun transformWorldToCamera(pw: Point3, poseInfo: AlgorithmProcessor.PoseInfo): Point3 {
+    private fun transformWorldToCamera(pw: Point3, poseInfo: PoseEstimator.PoseInfo): Point3 {
         val rMat = Mat()
         Calib3d.Rodrigues(poseInfo.rvec, rMat)
         

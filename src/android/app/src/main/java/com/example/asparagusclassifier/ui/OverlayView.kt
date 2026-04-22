@@ -98,6 +98,7 @@ class OverlayView @JvmOverloads constructor(
     private var baselineTail: List<PointF>? = null
     private var arucoMarkers: List<ArucoMarker>? = null
     private var axis3DPoints: List<PointF>? = null
+    private var markerAxes: Map<Int, List<PointF>>? = null
     private var bitmapWidth: Int = 0
     private var bitmapHeight: Int = 0
     // TextureView 在屏幕上的实际显示区域（相对于 OverlayView 自身的坐标）
@@ -155,6 +156,11 @@ class OverlayView @JvmOverloads constructor(
         invalidate()
     }
 
+    fun setMarkerAxes(axes: Map<Int, List<PointF>>?) {
+        markerAxes = axes
+        invalidate()
+    }
+
     fun setBackgroundBitmap(bitmap: Bitmap?) {
         backgroundBitmap = bitmap
         invalidate()
@@ -171,6 +177,7 @@ class OverlayView @JvmOverloads constructor(
         baselineHead = null
         baselineTail = null
         axis3DPoints = null
+        markerAxes = null
         backgroundBitmap = null
         invalidate()
     }
@@ -260,6 +267,33 @@ class OverlayView @JvmOverloads constructor(
                 canvas.drawLine(p0[0], p0[1], pX[0], pX[1], axisXPaint)
                 canvas.drawLine(p0[0], p0[1], pY[0], pY[1], axisYPaint)
                 canvas.drawLine(p0[0], p0[1], pZ[0], pZ[1], axisZPaint)
+            }
+        }
+        
+        // 绘制每个标记的独立坐标轴 (诊断用)
+        markerAxes?.forEach { (id, pts) ->
+            if (pts.size >= 4) {
+                val p0 = floatArrayOf(pts[0].x, pts[0].y)
+                val pX = floatArrayOf(pts[1].x, pts[1].y)
+                val pY = floatArrayOf(pts[2].x, pts[2].y)
+                val pZ = floatArrayOf(pts[3].x, pts[3].y)
+                
+                coordinateMatrix.mapPoints(p0)
+                coordinateMatrix.mapPoints(pX)
+                coordinateMatrix.mapPoints(pY)
+                coordinateMatrix.mapPoints(pZ)
+                
+                // 绘制细一点的轴线，避免遮挡
+                val thinX = Paint(axisXPaint).apply { strokeWidth = 5f }
+                val thinY = Paint(axisYPaint).apply { strokeWidth = 5f }
+                val thinZ = Paint(axisZPaint).apply { strokeWidth = 5f }
+                
+                canvas.drawLine(p0[0], p0[1], pX[0], pX[1], thinX)
+                canvas.drawLine(p0[0], p0[1], pY[0], pY[1], thinY)
+                canvas.drawLine(p0[0], p0[1], pZ[0], pZ[1], thinZ)
+                
+                // 绘制 ID 文本
+                canvas.drawText("ID:$id", p0[0] + 10, p0[1] - 10, textPaint.apply { textSize = 30f })
             }
         }
         

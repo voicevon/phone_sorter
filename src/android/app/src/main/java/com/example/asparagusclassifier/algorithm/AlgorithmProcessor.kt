@@ -26,42 +26,20 @@ object AlgorithmProcessor {
         val startTime = System.currentTimeMillis()
         Log.i(TAG, ">>> 开始执行算法管道 (三画布架构) <<<")
         
-        val origW = bitmap.width
-        val origH = bitmap.height
-        val scaleFactor = if (maxOf(origW, origH) > AlgorithmConfig.SCAN_MAX_SIDE) {
-            AlgorithmConfig.SCAN_MAX_SIDE.toDouble() / maxOf(origW, origH).toDouble()
-        } else 1.0
-
-        val workW = (origW * scaleFactor).toInt()
-        val workH = (origH * scaleFactor).toInt()
-        Log.i(TAG, "图像尺寸: ${origW}x${origH} -> 缩放后: ${workW}x${workH} (scale=%.3f)".format(scaleFactor))
-
-        val workBitmap = if (scaleFactor < 1.0) {
-            Bitmap.createScaledBitmap(bitmap, workW, workH, true)
-        } else bitmap
-
         return useMatScope { scope ->
-            val rgba = scope.createMat()
             val rgbaUndistorted = scope.createMat()
+            val context = preprocess(bitmap, calibration, scope, rgbaUndistorted)
+            val workW = context.workW
+            val workH = context.workH
+            val scaleFactor = context.scale
+
             val warpedRgba = scope.createMat()
-            // 为 warpedRgba 初始化尺寸和类型
             warpedRgba.create(AlgorithmConfig.TARGET_HEIGHT, AlgorithmConfig.TARGET_WIDTH, CvType.CV_8UC4)
             
             var transMat: Mat? = null
-            var poseInfo: PoseInfo? = null
+            var poseInfo: PoseEstimator.PoseInfo? = null
 
             try {
-                Utils.bitmapToMat(workBitmap, rgba)
-                
-                // --- Step 1: 物理去畸变 (生成 Canvas 2) ---
-                if (calibration != null && calibration.isValid()) {
-                    undistortImage(rgba, rgbaUndistorted, calibration, workBitmap.width, workBitmap.height)
-                    Log.i(TAG, "[Step 1] 去畸变完成")
-                } else {
-                    rgba.copyTo(rgbaUndistorted)
-                    Log.w(TAG, "[Step 1] 跳过去畸变 (机型不兼容或校准参数缺失)")
-                }
-                
                 // --- Step 2: 在物理画布上检测 ArUco (Canvas 2 基准) ---
                 val arucoResult = arucoEngine.detectBoardMarkers(rgbaUndistorted)
                 
@@ -76,9 +54,8 @@ object AlgorithmProcessor {
                         executionTimeMs = duration,
                         arucoCorners = arucoCorners, 
                         arucoIds = arucoIds,
-                        canvas1Bitmap = workBitmap,
                         canvas2Bitmap = matToBitmap(rgbaUndistorted),
-                        processedBitmap = if (viewMode == 2) matToBitmap(rgbaUndistorted) else workBitmap,
+                        processedBitmap = if (viewMode == 2) matToBitmap(rgbaUndistorted) else bitmap,
                         viewMode = viewMode
                     )
                 }
@@ -109,14 +86,12 @@ object AlgorithmProcessor {
                 val mapper = CoordinateMapper(scaleFactor, transMat)
                 Log.i(TAG, "[Step 3] 透视变换完成 (Warping)")
                 
-                // --- Step 3.5: V2 位姿估算 (基于 Canvas 2) ---
-                poseInfo = if (calibration != null && calibration.isValid()) {
-                    estimateCameraPose(srcPoints as MatOfPoint2f, calibration, workW, workH)
+                // --- Step 3.5: 位姿估算 (基于 Canvas 2) ---
+                val allImagePoints = collectArucoPoints(arucoResult)
+                poseInfo = if (allImagePoints.total().toInt() >= 4 && calibration != null && calibration.isValid()) {
+                    PoseEstimator.estimateCameraPose(allImagePoints, calibration, workW, workH)
                 } else null
                 
-                // 自动释放将由 useMatScope 处理，但 poseInfo 内部的 Mat 需要单独管理
-                poseInfo?.let { scope.manage(it.rvec); scope.manage(it.tvec); scope.manage(it.cameraMatrix) }
-
                 // --- Step 4: 逻辑画布分析 (Canvas 3 基准) ---
                 val visionResult = AsparagusVisionCore.analyze(
                     warpedRgba, 
@@ -132,7 +107,6 @@ object AlgorithmProcessor {
                         executionTimeMs = duration,
                         arucoCorners = arucoCorners, 
                         arucoIds = arucoIds,
-                        canvas1Bitmap = workBitmap,
                         canvas2Bitmap = matToBitmap(rgbaUndistorted),
                         canvas3Bitmap = matToBitmap(warpedRgba),
                         processedBitmap = matToBitmap(warpedRgba),
@@ -177,7 +151,7 @@ object AlgorithmProcessor {
 
                 // --- Step 5: 结果构造 ---
                 val duration = System.currentTimeMillis() - startTime
-                val c1Bmp = workBitmap
+                val c1Bmp = bitmap
                 val c2Bmp = matToBitmap(rgbaUndistorted)
                 val c3Bmp = matToBitmap(warpedRgba)
                 
@@ -227,7 +201,10 @@ object AlgorithmProcessor {
                     poseDistanceMm = poseInfo?.distanceMm ?: 0.0,
                     tiltAngle = poseInfo?.tiltAngleDeg ?: 0.0,
                     cameraPosWorld = poseInfo?.cameraPosWorld,
-                    axis3DPoints = poseInfo?.let { projectAxes(it) },
+                    axis3DPoints = poseInfo?.let { PoseEstimator.projectAxes(it) },
+                    markerAxes = arucoResult.markerMap.mapValues { (id, corners) ->
+                        PoseEstimator.estimateSingleMarkerPose(corners, calibration, workW, workH)
+                    }.filterValues { it != null } as Map<Int, List<android.graphics.PointF>>,
                     
                     // 芦笋头尾 3D 坐标 (假设 Z=8mm)
                     headPosWorld = visionResult.axisPoints.firstOrNull()?.let {
@@ -253,11 +230,51 @@ object AlgorithmProcessor {
         }
     }
     
-    /**
-     * 实时位姿处理逻辑：
-     * 去除所有芦笋分割和测量，仅保留 ArUco 检测和 solvePnP
-     */
     fun processRealtimePose(bitmap: Bitmap, calibration: CalibrationData?): AlgorithmResult {
+        return useMatScope { scope ->
+            val rgbaUndistorted = scope.createMat()
+            val context = preprocess(bitmap, calibration, scope, rgbaUndistorted)
+            
+            try {
+                // 1. 检测标记
+                val arucoResult = arucoEngine.detectBoardMarkers(rgbaUndistorted)
+                if (!arucoResult.success) {
+                    return@useMatScope AlgorithmResult(false, error = "Aruco Lost")
+                }
+                
+                // 2. 解算位姿
+                val allPoints = collectArucoPoints(arucoResult)
+                val poseInfo = if (allPoints.total().toInt() >= 4 && calibration != null && calibration.isValid()) {
+                    PoseEstimator.estimateCameraPose(allPoints, calibration, context.workW, context.workH)
+                } else null
+                
+                val c2Bmp = matToBitmap(rgbaUndistorted)
+                
+                return@useMatScope AlgorithmResult(
+                    success = true,
+                    arucoCorners = arucoResult.markerMap.values.toList(),
+                    arucoIds = arucoResult.markerMap.keys.toList(),
+                    poseDistanceMm = poseInfo?.distanceMm ?: 0.0,
+                    tiltAngle = poseInfo?.tiltAngleDeg ?: 0.0,
+                    cameraPosWorld = poseInfo?.cameraPosWorld,
+                    axis3DPoints = poseInfo?.let { PoseEstimator.projectAxes(it) },
+                    markerAxes = arucoResult.markerMap.mapValues { (id, corners) ->
+                        PoseEstimator.estimateSingleMarkerPose(corners, calibration, context.workW, context.workH)
+                    }.filterValues { it != null } as Map<Int, List<android.graphics.PointF>>,
+                    canvas2Bitmap = c2Bmp,
+                    processedBitmap = c2Bmp,
+                    viewMode = 2
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "processRealtimePose Error: ${e.message}", e)
+                return@useMatScope AlgorithmResult(false, error = e.message)
+            }
+        }
+    }
+
+    private data class PreprocessContext(val workW: Int, val workH: Int, val scale: Double)
+
+    private fun preprocess(bitmap: Bitmap, calibration: CalibrationData?, scope: com.example.asparagusclassifier.util.MatScope, dstUndistorted: Mat): PreprocessContext {
         val origW = bitmap.width
         val origH = bitmap.height
         val scaleFactor = if (maxOf(origW, origH) > AlgorithmConfig.SCAN_MAX_SIDE) {
@@ -271,210 +288,50 @@ object AlgorithmProcessor {
             Bitmap.createScaledBitmap(bitmap, workW, workH, true)
         } else bitmap
 
-        return useMatScope { scope ->
-            val rgba = scope.createMat()
-            val rgbaUndistorted = scope.createMat()
-            var poseInfo: PoseInfo? = null
-            
-            try {
-                Utils.bitmapToMat(workBitmap, rgba)
-                
-                // 1. 去畸变 (使用缩放后的尺寸)
-                if (calibration != null && calibration.isValid()) {
-                    undistortImage(rgba, rgbaUndistorted, calibration, workW, workH)
-                } else {
-                    rgba.copyTo(rgbaUndistorted)
-                }
-                
-                // 2. 检测标记
-                val arucoResult = arucoEngine.detectBoardMarkers(rgbaUndistorted)
-                if (!arucoResult.success) {
-                    Log.d(TAG, "RealtimePose: ArUco Lost")
-                    return@useMatScope AlgorithmResult(false, error = "Aruco Lost (${workW}x${workH})")
-                }
-                Log.d(TAG, "RealtimePose: ArUco Detected, ID=${arucoResult.markerMap.keys}")
-                
-                // 3. 解算位姿
-                val pTL = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_TL]!!)
-                val pTR = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_TR]!!)
-                val pBR = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_BR]!!)
-                val pBL = centerOf(arucoResult.markerMap[AlgorithmConfig.ID_BL]!!)
+        val rgba = scope.createMat()
+        Utils.bitmapToMat(workBitmap, rgba)
+        
+        if (calibration != null && calibration.isValid()) {
+            undistortImage(rgba, dstUndistorted, calibration, workW, workH)
+        } else {
+            rgba.copyTo(dstUndistorted)
+        }
+        
+        return PreprocessContext(workW, workH, scaleFactor)
+    }
 
-                val imagePoints = scope.manage(MatOfPoint2f(
-                    Point(pTL.x.toDouble(), pTL.y.toDouble()),
-                    Point(pTR.x.toDouble(), pTR.y.toDouble()),
-                    Point(pBR.x.toDouble(), pBR.y.toDouble()),
-                    Point(pBL.x.toDouble(), pBL.y.toDouble())
-                ))
-                
-                poseInfo = if (calibration != null && calibration.isValid()) {
-                    estimateCameraPose(imagePoints as MatOfPoint2f, calibration, workW, workH)
-                } else null
-                
-                poseInfo?.let { scope.manage(it.rvec); scope.manage(it.tvec); scope.manage(it.cameraMatrix) }
-                
-                val c2Bmp = matToBitmap(rgbaUndistorted)
-                
-                return@useMatScope AlgorithmResult(
-                    success = true,
-                    arucoCorners = arucoResult.markerMap.values.toList(),
-                    arucoIds = arucoResult.markerMap.keys.toList(),
-                    poseDistanceMm = poseInfo?.distanceMm ?: 0.0,
-                    tiltAngle = poseInfo?.tiltAngleDeg ?: 0.0,
-                    cameraPosWorld = poseInfo?.cameraPosWorld,
-                    axis3DPoints = poseInfo?.let { projectAxes(it) },
-                    canvas2Bitmap = c2Bmp,
-                    processedBitmap = c2Bmp,
-                    viewMode = 2
-                )
-            } catch (e: Exception) {
-                return@useMatScope AlgorithmResult(false, error = e.message)
+    private fun collectArucoPoints(result: ArucoEngine.DetectionResult): MatOfPoint2f {
+        val allImagePoints = mutableListOf<Point>()
+        val targetIds = listOf(AlgorithmConfig.ID_TL, AlgorithmConfig.ID_TR, AlgorithmConfig.ID_BR, AlgorithmConfig.ID_BL)
+        for (id in targetIds) {
+            result.markerMap[id]?.let { corners ->
+                for (p in corners) {
+                    allImagePoints.add(Point(p.x.toDouble(), p.y.toDouble()))
+                }
             }
         }
+        return MatOfPoint2f(*allImagePoints.toTypedArray())
     }
 
     /**
-     * 投影 3D 坐标轴到 2D 像平面
-     * @return [原点, X末端, Y末端, Z末端] 的 2D 坐标列表
+     * 根据标定数据和当前分辨率构建相机内参矩阵
+     * (已迁移至 PoseEstimator，此处仅为向后兼容保留或供内部 undistort 使用)
      */
-    private fun projectAxes(pose: PoseInfo): List<android.graphics.PointF> {
-        val axisPoints3D = MatOfPoint3f(
-            Point3(0.0, 0.0, 0.0),    // 原点 (标定板中心)
-            Point3(50.0, 0.0, 0.0),   // X 轴 (红)
-            Point3(0.0, 50.0, 0.0),   // Y 轴 (绿)
-            Point3(0.0, 0.0, 50.0)    // Z 轴 (蓝)
-        )
-        val imagePoints2D = MatOfPoint2f()
-        val distCoeffs = MatOfDouble(0.0, 0.0, 0.0, 0.0, 0.0) // solvePnP 输入已去畸变
-        
-        Calib3d.projectPoints(axisPoints3D, pose.rvec, pose.tvec, pose.cameraMatrix, distCoeffs, imagePoints2D)
-        
-        val list = mutableListOf<android.graphics.PointF>()
-        val data = imagePoints2D.toArray()
-        for (p in data) {
-            list.add(android.graphics.PointF(p.x.toFloat(), p.y.toFloat()))
-        }
-        Log.d(TAG, "RealtimePose: Axis points projected: ${list.size}")
-        
-        axisPoints3D.release()
-        imagePoints2D.release()
-        distCoeffs.release()
-        return list
-    }
-
-    /**
-     * 估算相机在标定板坐标系中的 3D 位姿
-     */
-    private fun estimateCameraPose(
-        imagePoints: MatOfPoint2f, 
-        calibration: CalibrationData,
-        currentW: Int, 
-        currentH: Int
-    ): PoseInfo? {
-        val camMatrix = constructCameraMatrix(calibration, currentW, currentH)
-        val distCoeffs = MatOfDouble(0.0, 0.0, 0.0, 0.0, 0.0) // 已去畸变，系数为0
-        
-        // 直接使用预置的居中标定点矩阵
-        val objectPoints = AlgorithmConfig.BOARD_OBJECT_POINTS
-        
-        val rvec = Mat()
-        val tvec = Mat()
-        
-        val success = Calib3d.solvePnP(objectPoints, imagePoints, camMatrix, distCoeffs, rvec, tvec)
-        
-        if (!success) {
-            Log.e(TAG, "solvePnP 失败")
-            camMatrix.release()
-            objectPoints.release()
-            rvec.release()
-            tvec.release()
-            return null
-        }
-        
-        // 计算距离和角度
-        val tvecArray = DoubleArray(3)
-        tvec.get(0, 0, tvecArray)
-        val distance = Math.sqrt(tvecArray[0] * tvecArray[0] + tvecArray[1] * tvecArray[1] + tvecArray[2] * tvecArray[2])
-        
-        // 角度计算 (简化版：旋转向量的模表示旋转角度)
-        val rvecArray = DoubleArray(3)
-        rvec.get(0, 0, rvecArray)
-        val rotationRad = Math.sqrt(rvecArray[0] * rvecArray[0] + rvecArray[1] * rvecArray[1] + rvecArray[2] * rvecArray[2])
-        val tiltAngleDeg = Math.toDegrees(rotationRad)
-
-        Log.i(TAG, "位姿估算成功: 距离=%.1fmm, 倾角=%.1f°".format(distance, tiltAngleDeg))
-        
-        // 计算相机在世界坐标系 (标定板) 中的位置: Pw = -R^T * t
-        val rMat = Mat()
-        Calib3d.Rodrigues(rvec, rMat)
-        val rMatT = rMat.t()
-        val camWorldMat = Mat()
-        Core.gemm(rMatT, tvec, -1.0, Mat(), 0.0, camWorldMat)
-        
-        val camPosWorld = DoubleArray(3)
-        camWorldMat.get(0, 0, camPosWorld)
-        
-        val info = PoseInfo(rvec.clone(), tvec.clone(), camMatrix.clone(), distance, tiltAngleDeg, camPosWorld)
-        
-        rMat.release()
-        rMatT.release()
-        camWorldMat.release()
-        
-        camMatrix.release()
-        rvec.release()
-        tvec.release()
-        
-        return info
-    }
-
     private fun constructCameraMatrix(calibration: CalibrationData, currentW: Int, currentH: Int): Mat {
-        val camMatrix = Mat(3, 3, CvType.CV_32F)
-        val scaleX = currentW.toDouble() / calibration.sensorWidth.toDouble()
-        val scaleY = currentH.toDouble() / calibration.sensorHeight.toDouble()
-        
-        val fx = calibration.intrinsic[0].toDouble() * scaleX
-        val fy = calibration.intrinsic[1].toDouble() * scaleY
-        val cx = calibration.intrinsic[2].toDouble() * scaleX
-        val cy = calibration.intrinsic[3].toDouble() * scaleY
-        val skew = calibration.intrinsic[4].toDouble() * scaleX
-        
-        camMatrix.put(0, 0, fx)
-        camMatrix.put(0, 1, skew)
-        camMatrix.put(0, 2, cx)
-        camMatrix.put(1, 1, fy)
-        camMatrix.put(1, 2, cy)
-        camMatrix.put(2, 2, 1.0)
-        return camMatrix
+        return PoseEstimator.constructCameraMatrix(calibration, currentW, currentH)
     }
 
     private fun undistortImage(src: Mat, dst: Mat, calibration: CalibrationData, currentW: Int, currentH: Int) {
         val camMatrix = constructCameraMatrix(calibration, currentW, currentH)
         val distCoeffs = MatOfDouble(*DoubleArray(calibration.distortion.size) { calibration.distortion[it].toDouble() })
         
-        Log.d(TAG, "执行去畸变...")
         Calib3d.undistort(src, dst, camMatrix, distCoeffs)
         
         camMatrix.release()
         distCoeffs.release()
     }
 
-    /**
-     * 封装位姿信息，便于传递和释放
-     */
-    data class PoseInfo(
-        val rvec: Mat,
-        val tvec: Mat,
-        val cameraMatrix: Mat,
-        val distanceMm: Double,
-        val tiltAngleDeg: Double,
-        val cameraPosWorld: DoubleArray? = null
-    ) {
-        fun release() {
-            rvec.release()
-            tvec.release()
-            cameraMatrix.release()
-        }
-    }
+    // 移除 PoseInfo 数据类定义，使用 PoseEstimator.PoseInfo
 
     private fun matToBitmap(mat: Mat): Bitmap {
         val bmp = Bitmap.createBitmap(mat.cols(), mat.rows(), Bitmap.Config.ARGB_8888)
