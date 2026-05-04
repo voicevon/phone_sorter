@@ -10,6 +10,10 @@ import org.opencv.core.Point3
  * 包含所有视觉参数、物理参数和阈值
  */
 object AlgorithmConfig {
+    // 运行时动态配置
+    var isAruco3DEnabled = true
+    var isWorldCoordEnabled = true
+
     // ArUco 标记 ID 配置
     const val ID_TL = 10
     const val ID_TR = 13

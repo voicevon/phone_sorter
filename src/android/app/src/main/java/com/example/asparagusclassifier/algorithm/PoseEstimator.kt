@@ -143,7 +143,7 @@ object PoseEstimator {
             
             if (rvecs.isEmpty()) return@useMatScope null
             
-            val bestIdx = selectBestSolution(rvecs, tvecs, objPoints, imgPoints, camMatrix, distCoeffs, lastMarkerPoses[markerId])
+            val bestIdx = selectBestSolution(rvecs, tvecs, objPoints as MatOfPoint3f, imgPoints as MatOfPoint2f, camMatrix, distCoeffs, lastMarkerPoses[markerId])
             
             var finalRvec = rvecs[bestIdx].clone()
             var finalTvec = tvecs[bestIdx].clone()
@@ -366,5 +366,27 @@ object PoseEstimator {
         
         rMat.release(); rT.release(); pcMat.release(); pwMat.release(); pwFinalMat.release()
         return Point3(pw[0], pw[1], pw[2])
+    }
+
+    /**
+     * 世界坐标 -> 相机坐标系
+     * Pc = R * Pw + t
+     */
+    fun transformWorldToCamera(pw: Point3, poseInfo: PoseInfo): Point3 {
+        val rMat = Mat()
+        Calib3d.Rodrigues(poseInfo.rvec, rMat)
+        
+        val rData = DoubleArray(9)
+        rMat.get(0, 0, rData)
+        
+        val tData = DoubleArray(3)
+        poseInfo.tvec.get(0, 0, tData)
+        
+        val xc = rData[0] * pw.x + rData[1] * pw.y + rData[2] * pw.z + tData[0]
+        val yc = rData[3] * pw.x + rData[4] * pw.y + rData[5] * pw.z + tData[1]
+        val zc = rData[6] * pw.x + rData[7] * pw.y + rData[8] * pw.z + tData[2]
+        
+        rMat.release()
+        return Point3(xc, yc, zc)
     }
 }

@@ -268,25 +268,13 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
 
     override fun onCreateOptionsMenu(menu: Menu?): Boolean {
         menuInflater.inflate(R.menu.main_menu, menu)
-        // 根据初始 ViewModel 中的 viewMode 设置勾选状态
-        val mode = viewModel.viewMode.value ?: 2
-        val initialId = if (mode == 1) R.id.menu_view_raw else R.id.menu_view_corrected
-        menu?.findItem(initialId)?.isChecked = true
         return true
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
-            R.id.menu_view_raw -> {
-                item.isChecked = true
-                viewModel.setViewMode(1)
-                android.widget.Toast.makeText(this, "切换至：原始视图 (C1)", android.widget.Toast.LENGTH_SHORT).show()
-                true
-            }
-            R.id.menu_view_corrected -> {
-                item.isChecked = true
-                viewModel.setViewMode(2)
-                android.widget.Toast.makeText(this, "切换至：3D 分析视图 (C2)", android.widget.Toast.LENGTH_SHORT).show()
+            R.id.action_image_processing_config -> {
+                showImageProcessingConfigDialog()
                 true
             }
             R.id.action_camera_params -> {
@@ -447,6 +435,22 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     
     
     
+    private fun showImageProcessingConfigDialog() {
+        val options = arrayOf("检测 ArUco 3D 坐标", "显示世界坐标系")
+        val checked = booleanArrayOf(AlgorithmConfig.isAruco3DEnabled, AlgorithmConfig.isWorldCoordEnabled)
+        
+        android.app.AlertDialog.Builder(this)
+            .setTitle("图像处理配置")
+            .setMultiChoiceItems(options, checked) { _, which, isChecked ->
+                when (which) {
+                    0 -> AlgorithmConfig.isAruco3DEnabled = isChecked
+                    1 -> AlgorithmConfig.isWorldCoordEnabled = isChecked
+                }
+            }
+            .setPositiveButton("确定", null)
+            .show()
+    }
+
     private fun showCameraParamsDialog() {
         val cal = viewModel.currentCalibration.value
         val message = if (cal != null && cal.isValid()) {

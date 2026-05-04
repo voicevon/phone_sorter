@@ -1,6 +1,7 @@
 package com.example.asparagusclassifier.algorithm
 
 import android.graphics.PointF
+import org.opencv.core.MatOfPoint
 import org.opencv.core.MatOfPoint2f
 import org.opencv.core.MatOfInt
 import org.opencv.imgproc.Imgproc
@@ -52,10 +53,12 @@ object QualityAnalyzer {
         val headRegionPoints = contour.filter { dist(it, headPt) < 50.0 } // 50px 约 5mm
         if (headRegionPoints.size < 10) return 1.0
 
-        val mat = MatOfPoint2f(*headRegionPoints.map { org.opencv.core.Point(it.x.toDouble(), it.y.toDouble()) }.toTypedArray())
+        val points = headRegionPoints.map { org.opencv.core.Point(it.x.toDouble(), it.y.toDouble()) }.toTypedArray()
+        val mat2f = MatOfPoint2f(*points)
+        val mat = MatOfPoint(*points)
         
         // 轮廓长度
-        val arcLength = Imgproc.arcLength(mat, false)
+        val arcLength = Imgproc.arcLength(mat2f, false)
         
         // 凸包
         val hullIndices = MatOfInt()
@@ -63,7 +66,7 @@ object QualityAnalyzer {
         
         val hullPoints = mutableListOf<org.opencv.core.Point>()
         val indices = hullIndices.toArray()
-        val originalPoints = mat.toArray()
+        val originalPoints = mat2f.toArray()
         for (idx in indices) {
             hullPoints.add(originalPoints[idx])
         }
@@ -73,6 +76,7 @@ object QualityAnalyzer {
         val complexity = if (hullLength > 0) arcLength / hullLength else 1.0
         
         mat.release()
+        mat2f.release()
         hullIndices.release()
         hullMat.release()
         

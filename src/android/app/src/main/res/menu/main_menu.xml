@@ -2,21 +2,9 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
     <item
-        android:id="@+id/action_view_mode"
-        android:title="视图模式"
-        app:showAsAction="never">
-        <menu>
-            <group android:checkableBehavior="single">
-                <item
-                    android:id="@+id/menu_view_raw"
-                    android:title="原始预览 (C1)" />
-                <item
-                    android:id="@+id/menu_view_corrected"
-                    android:checked="true"
-                    android:title="3D 分析视图 (C2)" />
-            </group>
-        </menu>
-    </item>
+        android:id="@+id/action_image_processing_config"
+        android:title="图像处理配置"
+        app:showAsAction="never" />
     <item
         android:id="@+id/action_camera_params"
         android:title="相机标定参数"
