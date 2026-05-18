@@ -63,7 +63,14 @@ class OverlayView @JvmOverloads constructor(
     }
     fun setAxis3D(points: List<PointF>?) { axis3DPoints = points; invalidate() }
     fun setMarkerAxes(axes: Map<Int, List<PointF>>?) { markerAxes = axes; invalidate() }
-    fun setBackgroundBitmap(bitmap: Bitmap?) { backgroundBitmap = bitmap; invalidate() }
+    fun setBackgroundBitmap(bitmap: Bitmap?) {
+        val old = backgroundBitmap
+        backgroundBitmap = bitmap
+        if (old != null && old != bitmap) {
+            old.recycle()
+        }
+        invalidate()
+    }
     
     fun setDisplayRect() {
         updateMatrix(); invalidate()
@@ -72,7 +79,12 @@ class OverlayView @JvmOverloads constructor(
     fun clearMarkers() {
         arucoMarkers = null; asparagusContour = null; tailPoint = null; axisPath = null
         diameterLines = null; baselineOverall = null; baselineHead = null; baselineTail = null
-        axis3DPoints = null; markerAxes = null; backgroundBitmap = null
+        axis3DPoints = null; markerAxes = null; 
+        val old = backgroundBitmap
+        backgroundBitmap = null
+        if (old != null) {
+            old.recycle()
+        }
         invalidate()
     }
 

@@ -139,8 +139,15 @@ class MainViewModel(private val visionRepository: VisionRepository) : ViewModel(
                 }
                 
                 onResult(filteredResult)
+                
+                // 如果成功输出了渲染后的新 Bitmap，则立即释放输入的原始 Bitmap
+                if (result.canvas2Bitmap != null && result.canvas2Bitmap != bitmap) {
+                    bitmap.recycle()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "实时分析失败: ${e.message}")
+                bitmap.recycle() // 发生异常时也释放原始 Bitmap
+                onResult(AlgorithmResult(false, error = e.message))
             }
         }
     }

@@ -21,6 +21,9 @@ import com.example.asparagusclassifier.camera.CameraManager
 import com.example.asparagusclassifier.algorithm.AlgorithmProcessor
 import com.example.asparagusclassifier.algorithm.AlgorithmResult
 import com.example.asparagusclassifier.ui.OverlayView
+import com.example.asparagusclassifier.bluetooth.BleManager
+import com.example.asparagusclassifier.bluetooth.SorterTargetMapper
+import android.widget.Toast
 import org.opencv.android.OpenCVLoader
 import android.util.Log
 import android.view.Menu
@@ -54,6 +57,8 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     private lateinit var textureView: TextureView
     private lateinit var overlayView: OverlayView
     private lateinit var btnCapture: Button
+    private lateinit var btnBleTest: Button
+    private var testGradeCounter = 0
     private lateinit var cbAuto: CheckBox
     private lateinit var tvResult: TextView
     private lateinit var layoutResult: View
@@ -63,6 +68,10 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
     private lateinit var viewModel: MainViewModel
     private lateinit var visionRepository: VisionRepository
     private lateinit var ttsManager: com.example.asparagusclassifier.util.TtsManager
+    private lateinit var bleManager: BleManager
+    private var lastRealtimeStatus: String = "信号排队中..."
+    private var lastStatusColor: Int = android.graphics.Color.YELLOW
+    private var isPoseProcessing = false
     
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
     private var lastPoseWorldText: CharSequence = ""
@@ -134,6 +143,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         cameraManager = CameraManager(this, textureView)
         
         btnCapture = findViewById(R.id.btnCapture)
+        btnBleTest = findViewById(R.id.btnBleTest)
         cbAuto = findViewById(R.id.cbAuto)
         tvResult = findViewById(R.id.tvResult)
         layoutResult = findViewById(R.id.layoutResult)
@@ -157,6 +167,10 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             captureAndProcess()
         }
         
+        btnBleTest.setOnClickListener {
+            triggerBleTest()
+        }
+        
         cbAuto.setOnCheckedChangeListener { _, isChecked ->
             viewModel.setAutoCaptureEnabled(isChecked)
         }
@@ -165,39 +179,67 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             viewModel.lastResult.value?.let { DiagnosticDialog.show(this, it) }
         }
         
+        bleManager = BleManager(this)
+        setupBleObservers()
+        
         // 权限检查和启动逻辑已移至 onResume
+    }
+
+    private val ALL_PERMISSIONS_CODE = 101
+
+    private fun getRequiredPermissions(): Array<String> {
+        val permissions = mutableListOf(Manifest.permission.CAMERA)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+        return permissions.toTypedArray()
+    }
+
+    private fun checkPermissions() {
+        val missing = getRequiredPermissions().filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, missing.toTypedArray(), ALL_PERMISSIONS_CODE)
+        } else {
+            cameraManager.startCamera()
+            bleManager.startScan()
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        Log.i(TAG, "Activity Resumed, 尝试恢复相机")
-        checkCameraPermission()
+        Log.i(TAG, "Activity Resumed, 尝试恢复相机和蓝牙")
+        checkPermissions()
         viewModel.setRealtimePoseActive(true)
         realtimePoseHandler.post(realtimePoseRunnable)
     }
 
     override fun onStop() {
         super.onStop()
-        Log.i(TAG, "Activity Stopped, 释放相机资源")
+        Log.i(TAG, "Activity Stopped, 释放设备资源")
         viewModel.setRealtimePoseActive(false)
         realtimePoseHandler.removeCallbacks(realtimePoseRunnable)
         cameraManager.release()
-    }
-    
-    private fun checkCameraPermission() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_CODE)
-        } else {
-            // startCamera 内部会等待 Surface 可用
-            cameraManager.startCamera()
-        }
+        bleManager.disconnect()
     }
     
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == CAMERA_PERMISSION_CODE) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+        if (requestCode == ALL_PERMISSIONS_CODE) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
                 cameraManager.startCamera()
+            }
+            val bleGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+            } else {
+                ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            }
+            if (bleGranted) {
+                bleManager.startScan()
             }
         }
     }
@@ -306,6 +348,9 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
 
     private fun captureAndProcess() {
         val bitmap = textureView.getBitmap() ?: return
+        val old = lastBitmap
+        lastBitmap = bitmap
+        old?.recycle()
         viewModel.analyzeImage(bitmap)
     }
 
@@ -393,6 +438,12 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                 "${result.grade} 级，直径 ${String.format(java.util.Locale.US, "%.1f", diameterCm)} 厘米，长度 ${lengthCm.toInt()} 厘米"
             }
             ttsManager.speak(ttsText)
+
+            // 发送分拣结果至 ESP32 控制器
+            if (bleManager.connectionState.value == BleManager.ConnectionState.DISCOVERED) {
+                val targetId = SorterTargetMapper.mapGradeToTargetId(result.grade)
+                bleManager.sendTargetId(targetId)
+            }
         }
         
         if (viewModel.isAutoCaptureEnabled.value == true) {
@@ -491,6 +542,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         handler.removeCallbacks(autoCaptureRunnable)
         visionRepository.release()
         cameraManager.release()
+        bleManager.disconnect()
     }
     private fun dismissResultView() {
         if (layoutResult.visibility == View.VISIBLE) {
@@ -506,17 +558,21 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
      * 从 TextureView 获取当前帧并调用实时优化版算法
      */
     private fun updateRealtimePose() {
+        if (isPoseProcessing) return
         val bitmap = textureView.getBitmap() ?: return
+        isPoseProcessing = true
         
         viewModel.analyzeRealtimePose(bitmap) { result ->
             runOnUiThread {
+                isPoseProcessing = false
                 if (result.success) {
                     val cam = result.cameraPosWorld
                     if (cam != null) {
                         setColoredPoseText(tvHUDPose, cam[0], cam[1], Math.abs(cam[2]), "Cam Pos (World):")
                         lastPoseWorldText = tvHUDPose.text
-                        tvHUDStatus.text = "Status: 已对准 (实时解算)"
-                        tvHUDStatus.setTextColor(android.graphics.Color.GREEN)
+                        lastRealtimeStatus = "已对准"
+                        lastStatusColor = android.graphics.Color.GREEN
+                        updateStatusHUD()
                     }
                     
                     val displayBmp = result.canvas2Bitmap ?: bitmap
@@ -536,12 +592,90 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                 } else {
                     // 信号丢失时直接显示，不再锁定末帧，展现真实解算状态
                     tvHUDPose.text = "X:--- Y:--- Z:---"
-                    tvHUDStatus.text = "Status: 信号丢失 (实时)"
-                    tvHUDStatus.setTextColor(android.graphics.Color.RED)
+                    lastRealtimeStatus = "信号丢失"
+                    lastStatusColor = android.graphics.Color.RED
+                    updateStatusHUD()
                     overlayView.clearMarkers()
                 }
             }
         }
+    }
+
+    private fun setupBleObservers() {
+        lifecycleScope.launchWhenStarted {
+            bleManager.connectionState.collect { state ->
+                runOnUiThread {
+                    updateStatusHUD()
+                }
+            }
+        }
+        
+        lifecycleScope.launchWhenStarted {
+            bleManager.esp32State.collect { state ->
+                runOnUiThread {
+                    updateStatusHUD()
+                }
+            }
+        }
+
+        lifecycleScope.launchWhenStarted {
+            bleManager.esp32Error.collect { error ->
+                runOnUiThread {
+                    updateStatusHUD()
+                    if (error > 0) {
+                        showEsp32ErrorDialog(error)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun updateStatusHUD() {
+        val bleState = bleManager.connectionState.value
+        val espState = bleManager.esp32State.value
+        val espError = bleManager.esp32Error.value
+        
+        val bleText = when (bleState) {
+            BleManager.ConnectionState.DISCONNECTED -> "🔴 蓝牙断开"
+            BleManager.ConnectionState.CONNECTING -> "🟡 扫描蓝牙..."
+            BleManager.ConnectionState.CONNECTED -> "🔵 建立连接..."
+            BleManager.ConnectionState.DISCOVERED -> {
+                val stateStr = when (espState) {
+                    0 -> "待机"
+                    1 -> "归零中"
+                    2 -> "分拣中"
+                    3 -> "故障"
+                    else -> "未知"
+                }
+                val errStr = if (espError > 0) "!故障!" else ""
+                "🟢 分拣机:$stateStr$errStr"
+            }
+        }
+        
+        tvHUDStatus.text = "对齐: $lastRealtimeStatus | $bleText"
+        tvHUDStatus.setTextColor(if (espError > 0) android.graphics.Color.RED else lastStatusColor)
+    }
+
+    private var errorDialog: android.app.AlertDialog? = null
+
+    private fun showEsp32ErrorDialog(errorCode: Int) {
+        if (errorDialog?.isShowing == true) return
+        
+        val errorMsg = when (errorCode) {
+            1 -> "归零超时 (Homing Timeout)"
+            2 -> "分拣卡堵 (Sorter Jammed)"
+            else -> "未知故障 (Code: 0x%02X)".format(errorCode)
+        }
+        
+        errorDialog = android.app.AlertDialog.Builder(this)
+            .setTitle("⚠️ 分拣机硬件故障警报")
+            .setMessage("检测到分拣控制器发生故障：\n\n$errorMsg\n\n请检查物理设备是否异常，点击复位将清除错误并重新启动归零流程。")
+            .setCancelable(false)
+            .setPositiveButton("一键复位 (Reset)") { _, _ ->
+                bleManager.sendCommand(0x01) // 0x01 = 清除错误并归零
+            }
+            .setNegativeButton("忽略", null)
+            .show()
     }
 
     private fun setColoredPoseText(tv: android.widget.TextView, x: Double, y: Double, z: Double, title: String) {
@@ -561,5 +695,38 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         if (zIdx != -1) spannable.setSpan(ForegroundColorSpan(Color.BLUE), zIdx, zIdx + 2 + zStr.length, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
         
         tv.text = spannable
+    }
+
+    private fun triggerBleTest() {
+        val testGrades = arrayOf("A", "B", "C", "D", "E", "F")
+        val selectedGrade = testGrades[testGradeCounter % testGrades.size]
+        testGradeCounter++
+        
+        val targetId = SorterTargetMapper.mapGradeToTargetId(selectedGrade)
+        
+        runOnUiThread {
+            ttsManager.speak("测试发送等级 $selectedGrade，对应槽位 $targetId")
+            
+            val state = bleManager.connectionState.value
+            if (state == BleManager.ConnectionState.DISCOVERED) {
+                val success = bleManager.sendTargetId(targetId)
+                if (success) {
+                    Toast.makeText(this, "发送成功: 等级 $selectedGrade (槽位 $targetId)", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "发送失败: 蓝牙写入错误", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                val statusMsg = when (state) {
+                    BleManager.ConnectionState.DISCONNECTED -> "蓝牙未连接，正在启动扫描与重连..."
+                    BleManager.ConnectionState.CONNECTING -> "蓝牙正在扫描/连接中，请稍候..."
+                    BleManager.ConnectionState.CONNECTED -> "蓝牙已建立 GATT 物理连接，正在发现服务中，请稍候..."
+                    else -> "蓝牙状态异常"
+                }
+                Toast.makeText(this, statusMsg, Toast.LENGTH_SHORT).show()
+                if (state == BleManager.ConnectionState.DISCONNECTED) {
+                    bleManager.startScan()
+                }
+            }
+        }
     }
 }
