@@ -45,6 +45,10 @@ class BleManager(private val context: Context) {
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState
 
+    // 发现的分拣机候选设备列表 Flow
+    private val _scannedDevices = MutableStateFlow<List<BluetoothDevice>>(emptyList())
+    val scannedDevices: StateFlow<List<BluetoothDevice>> = _scannedDevices
+
     // ESP32 Status & Error State Flows
     private val _esp32State = MutableStateFlow(0) // 0=IDLE, 1=HOMING, 2=RUNNING, 3=ERROR
     val esp32State: StateFlow<Int> = _esp32State
@@ -64,16 +68,61 @@ class BleManager(private val context: Context) {
     private var targetChar: BluetoothGattCharacteristic? = null
     private var commandChar: BluetoothGattCharacteristic? = null
 
+    /**
+     * 获取当前已绑定的分拣机唯一广播名
+     */
+    fun getPairedDeviceName(): String? {
+        val prefs = context.getSharedPreferences("sorter_prefs", Context.MODE_PRIVATE)
+        return prefs.getString("paired_device_name", null)
+    }
+
+    /**
+     * 手动绑定设备名称并重新扫描
+     */
+    fun pairDevice(deviceName: String) {
+        val prefs = context.getSharedPreferences("sorter_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putString("paired_device_name", deviceName).apply()
+        Log.i(TAG, "成功绑定分拣机蓝牙设备名: $deviceName")
+        // 如果当前已连接，先断开，然后重新启动扫描连接新绑定的设备
+        disconnect()
+        startScan()
+    }
+
+    /**
+     * 解绑设备
+     */
+    fun unpairDevice() {
+        val prefs = context.getSharedPreferences("sorter_prefs", Context.MODE_PRIVATE)
+        prefs.edit().remove("paired_device_name").apply()
+        Log.i(TAG, "成功解绑分拣机蓝牙设备")
+        disconnect()
+    }
+
     // Scan Callback
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: android.bluetooth.le.ScanResult?) {
             result?.device?.let { device ->
                 val deviceName = device.name ?: ""
                 Log.d(TAG, "发现蓝牙外设: $deviceName [${device.address}]")
-                if (deviceName == "Sorter_Controller" || device.address != null) {
-                    Log.i(TAG, "匹配到目标分拣机，正在停止扫描并建立 GATT 连接...")
-                    stopScan()
-                    connectToDevice(device)
+                
+                val pairedName = getPairedDeviceName()
+                if (pairedName != null && pairedName.isNotEmpty()) {
+                    // 场景A: 已绑定设备，强比对并建立直连
+                    if (deviceName == pairedName) {
+                        Log.i(TAG, "匹配到绑定的分拣机 ($deviceName)，停止扫描并直连...")
+                        stopScan()
+                        connectToDevice(device)
+                    }
+                } else {
+                    // 场景B: 未绑定设备，收集所有符合 Sorter_ 前缀的设备候选者
+                    if (deviceName == "Sorter_Controller" || deviceName.startsWith("Sorter_")) {
+                        val currentList = _scannedDevices.value.toMutableList()
+                        if (currentList.none { it.address == device.address }) {
+                            currentList.add(device)
+                            _scannedDevices.value = currentList
+                            Log.i(TAG, "发现分拣机候选设备: $deviceName [${device.address}]")
+                        }
+                    }
                 }
             }
         }
@@ -167,26 +216,59 @@ class BleManager(private val context: Context) {
 
         if (isScanning) return
         
+        // 重置候选设备列表
+        _scannedDevices.value = emptyList()
+        
         shouldAutoReconnect = true
         _connectionState.value = ConnectionState.CONNECTING
         isScanning = true
         
         val scanner = bluetoothAdapter.bluetoothLeScanner
-        val filters = listOf(
-            ScanFilter.Builder().setDeviceName("Sorter_Controller").build(),
-            ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
-        )
+        
+        // 动态读取绑定的名称过滤，如果没有绑定，则只用 UUID 过滤以搜索所有 Sorter_* 设备
+        val pairedName = getPairedDeviceName()
+        val filters = if (pairedName != null && pairedName.isNotEmpty()) {
+            listOf(
+                ScanFilter.Builder().setDeviceName(pairedName).build(),
+                ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
+            )
+        } else {
+            listOf(
+                ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
+            )
+        }
+        
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
 
-        Log.i(TAG, "启动低功耗蓝牙扫描，目标: Sorter_Controller...")
+        Log.i(TAG, "启动低功耗蓝牙扫描，当前绑定目标: ${pairedName ?: "无 (自动匹配任何 Sorter_* 设备)"}...")
         scanner.startScan(filters, settings, scanCallback)
 
-        // 扫描超时保护
+        // 3秒极简发现窗期（针对未绑定设备）
+        if (pairedName == null || pairedName.isEmpty()) {
+            handler.postDelayed({
+                if (isScanning && getPairedDeviceName() == null) {
+                    val list = _scannedDevices.value
+                    if (list.size == 1) {
+                        val singleDeviceName = list[0].name ?: ""
+                        Log.i(TAG, "【极简配对】3秒窗期结束，仅发现 1 台分拣机 ($singleDeviceName)。自动绑定直连！")
+                        pairDevice(singleDeviceName)
+                    } else if (list.isEmpty()) {
+                        Log.w(TAG, "3秒窗期结束，未发现任何可用分拣机。")
+                        stopScan()
+                        _connectionState.value = ConnectionState.DISCONNECTED
+                    } else {
+                        Log.i(TAG, "3秒窗期结束，发现多台候选设备（共 ${list.size} 台）。保持扫描模式，由用户手动列表配对。")
+                    }
+                }
+            }, 3000L)
+        }
+
+        // 扫描总超时保护 (15秒)
         handler.postDelayed({
             if (isScanning && _connectionState.value == ConnectionState.CONNECTING) {
-                Log.w(TAG, "扫描超时，未发现目标设备")
+                Log.w(TAG, "扫描全局超时，未发现目标设备")
                 stopScan()
                 _connectionState.value = ConnectionState.DISCONNECTED
             }

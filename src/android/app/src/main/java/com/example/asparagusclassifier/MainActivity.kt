@@ -315,6 +315,10 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean {
         return when (item.itemId) {
+            R.id.action_scan_qr -> {
+                showDevicePairingDialog()
+                true
+            }
             R.id.action_image_processing_config -> {
                 showImageProcessingConfigDialog()
                 true
@@ -344,6 +348,70 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
             }
             else -> super.onOptionsItemSelected(item)
         }
+    }
+
+    /**
+     * 弹出极为精致的免扫码“设备配对选择”列表
+     * 通过物理 LED 快闪互动完成高可靠物理对齐绑定
+     */
+    private fun showDevicePairingDialog() {
+        val devices = bleManager.scannedDevices.value
+        val pairedName = bleManager.getPairedDeviceName()
+
+        if (devices.isEmpty()) {
+            android.app.AlertDialog.Builder(this)
+                .setTitle("🔍 搜寻分拣机设备")
+                .setMessage("当前未发现任何分拣控制器候选者。\n\n请确保分拣控制盒已插电且手机蓝牙已开启。系统将自动启动雷达扫描搜索设备。")
+                .setPositiveButton("立即重新扫描") { _, _ ->
+                    bleManager.startScan()
+                }
+                .setNegativeButton("取消", null)
+                .show()
+            return
+        }
+
+        // 提取设备名称列表以进行展示
+        val deviceNames = devices.map { it.name ?: "未知分拣机" }.toTypedArray()
+        
+        android.app.AlertDialog.Builder(this)
+            .setTitle("🔌 配对及绑定分拣机")
+            .setItems(deviceNames) { _, which ->
+                val selectedDevice = devices[which]
+                val deviceName = selectedDevice.name ?: ""
+                
+                // 1. 临时绑定连接以发送识别快闪指令
+                Toast.makeText(this, "正在激活 ${deviceName} 的物理闪烁以进行视觉确认...", Toast.LENGTH_SHORT).show()
+                bleManager.pairDevice(deviceName)
+                
+                // 延时 1000ms 发送 0x03 闪烁指令以确保蓝牙连接已完全稳定建立
+                handler.postDelayed({
+                    bleManager.sendCommand(0x03) // 0x03 = 触发物理指示灯 10Hz 急速闪烁
+                }, 1000L)
+                
+                // 2. 弹出确认框让用户验证闪烁
+                android.app.AlertDialog.Builder(this@MainActivity)
+                    .setTitle("👀 物理眨眼识别验证")
+                    .setMessage("物理分拣机【 ${deviceName.substringAfter("_")} 】上的指示灯是否正在【快速闪烁】？\n\n（若指示灯正在急速闪烁，说明物理机器与当前所选完全一致）")
+                    .setCancelable(false)
+                    .setPositiveButton("是的，确认绑定该机") { _, _ ->
+                        ttsManager.speak("已确认绑定分拣机 ${deviceName.substringAfter("_")}")
+                        Toast.makeText(this@MainActivity, "成功绑定目标设备: $deviceName", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("不是，返回选择其他设备") { _, _ ->
+                        bleManager.unpairDevice()
+                        // 延迟 500ms 重新弹出选择对话框
+                        handler.postDelayed({
+                            showDevicePairingDialog()
+                        }, 500L)
+                    }
+                    .show()
+            }
+            .setNeutralButton(if (pairedName != null) "解除当前绑定 ($pairedName)" else null) { _, _ ->
+                bleManager.unpairDevice()
+                Toast.makeText(this, "已解除分拣机绑定状态", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("关闭", null)
+            .show()
     }
 
     private fun captureAndProcess() {
@@ -634,11 +702,12 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
         val bleState = bleManager.connectionState.value
         val espState = bleManager.esp32State.value
         val espError = bleManager.esp32Error.value
+        val pairedName = bleManager.getPairedDeviceName()
         
         val bleText = when (bleState) {
-            BleManager.ConnectionState.DISCONNECTED -> "🔴 蓝牙断开"
-            BleManager.ConnectionState.CONNECTING -> "🟡 扫描蓝牙..."
-            BleManager.ConnectionState.CONNECTED -> "🔵 建立连接..."
+            BleManager.ConnectionState.DISCONNECTED -> "🔴 蓝牙断开 (${pairedName?.substringAfter("_") ?: "未绑定"})"
+            BleManager.ConnectionState.CONNECTING -> "🟡 正在扫描 (${pairedName?.substringAfter("_") ?: "全部"})..."
+            BleManager.ConnectionState.CONNECTED -> "🔵 建立连接 (${pairedName?.substringAfter("_") ?: "默认"})..."
             BleManager.ConnectionState.DISCOVERED -> {
                 val stateStr = when (espState) {
                     0 -> "待机"
@@ -648,7 +717,7 @@ class MainActivity : AppCompatActivity(), CameraManager.OnSizeInfoListener {
                     else -> "未知"
                 }
                 val errStr = if (espError > 0) "!故障!" else ""
-                "🟢 分拣机:$stateStr$errStr"
+                "🟢 分拣机(${pairedName?.substringAfter("_") ?: "默认"}):$stateStr$errStr"
             }
         }
         
